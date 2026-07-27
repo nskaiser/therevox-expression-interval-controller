@@ -1,0 +1,4 @@
+.DS_Store
+*.o
+*.uf2
+build/
