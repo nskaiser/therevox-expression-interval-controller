@@ -1,5 +1,7 @@
 # 3D Printed Enclosure
 
+> **⚠️ UNTESTED:** This enclosure design has not been printed or built yet. The STLs are generated from nominal component dimensions and have never been test-fitted against real hardware. Expect to verify every cutout and tolerance yourself — treat this as a starting point, not a proven design.
+
 First-pass printable enclosure for the Pico/DAC/OLED/rotary-encoder prototype.
 
 Generated files:

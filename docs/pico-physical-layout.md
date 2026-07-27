@@ -2,6 +2,8 @@
 
 This layout is meant to match the generated enclosure in `hardware/enclosure/stl/`.
 
+> **⚠️ UNTESTED:** The enclosure has not been printed or built yet, so this physical layout is a plan, not a verified build. The bench wiring in `docs/pico-prototype.md` is what has actually been tested.
+
 Use perfboard for the enclosure build. A solderless breadboard is fine for a bench test, but it will not fit cleanly in the printed box and the side jacks/lid controls will pull wires loose.
 
 ## Enclosure Orientation

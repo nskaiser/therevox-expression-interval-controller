@@ -21,7 +21,7 @@ The current build uses:
 | BOM | `docs/bom.md` |
 | Product notes | `docs/product-plan.md` |
 | Console simulator | `sim/pico_console_sim.cpp` |
-| 3D-print enclosure files | `hardware/enclosure/` |
+| 3D-print enclosure files (untested, never printed) | `hardware/enclosure/` |
 
 ## Voltage Model
 
