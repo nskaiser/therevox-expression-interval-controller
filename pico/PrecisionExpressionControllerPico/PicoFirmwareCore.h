@@ -20,10 +20,40 @@ constexpr int32_t kDefaultCenterMicrovolts = 1500000L;
 constexpr int32_t kDefaultOctaveMicrovolts = 1500000L;
 constexpr int32_t kDefaultUnipolarOctaveMicrovolts = kPicoDacFullScaleMicrovolts;
 constexpr uint16_t kDefaultFullScaleResponseCents = 924;
+constexpr uint8_t kPicoLfoLoRateSteps = 96;
+constexpr uint8_t kPicoLfoFmRateSteps = 60;
+constexpr uint8_t kPicoDefaultLfoLoRate = 48;
+constexpr uint8_t kPicoDefaultLfoFmRate = 28;
+constexpr float kPicoLfoLoMinHz = 0.05f;
+constexpr float kPicoLfoLoMaxHz = 20.0f;
+constexpr float kPicoLfoFmMinHz = 8.0f;
+constexpr float kPicoLfoFmMaxHz = 160.0f;
+constexpr uint8_t kPicoLfoMinDepthPercent = 50;
+constexpr uint8_t kPicoLfoMaxDepthPercent = 100;
+constexpr uint8_t kPicoLfoDepthStepPercent = 5;
+constexpr uint8_t kPicoLfoDepthStepCount =
+    ((kPicoLfoMaxDepthPercent - kPicoLfoMinDepthPercent) / kPicoLfoDepthStepPercent) + 1;
 
 enum PicoBendDirection : uint8_t {
   kPicoBendUp = 0,
   kPicoBendDown = 1,
+};
+
+enum PicoOutputMode : uint8_t {
+  kPicoOutputPedal = 0,
+  kPicoOutputLfoLo = 1,
+  kPicoOutputLfoFm = 2,
+  kPicoOutputModeCount = 3,
+};
+
+enum PicoLfoWave : uint8_t {
+  kPicoLfoSine = 0,
+  kPicoLfoTriangle = 1,
+  kPicoLfoSawUp = 2,
+  kPicoLfoSawDown = 3,
+  kPicoLfoSquare = 4,
+  kPicoLfoPulse = 5,
+  kPicoLfoWaveCount = 6,
 };
 
 enum PicoPedalCurve : uint8_t {
@@ -36,6 +66,161 @@ enum PicoPedalCurve : uint8_t {
 
 inline uint8_t clampPicoCurveMode(int value) {
   return static_cast<uint8_t>(clampValue<int>(value, 0, kPicoCurveCount - 1));
+}
+
+inline uint8_t clampPicoOutputMode(int value) {
+  return static_cast<uint8_t>(clampValue<int>(value, 0, kPicoOutputModeCount - 1));
+}
+
+inline uint8_t clampPicoLfoWave(int value) {
+  return static_cast<uint8_t>(clampValue<int>(value, 0, kPicoLfoWaveCount - 1));
+}
+
+inline uint8_t picoLfoRateMaxStep(uint8_t outputMode) {
+  return clampPicoOutputMode(outputMode) == kPicoOutputLfoFm ? kPicoLfoFmRateSteps
+                                                            : kPicoLfoLoRateSteps;
+}
+
+inline uint8_t clampPicoLfoRateStep(int value, uint8_t outputMode) {
+  return static_cast<uint8_t>(clampValue<int>(value, 0, picoLfoRateMaxStep(outputMode)));
+}
+
+inline uint8_t clampPicoLfoDepthPercent(int value) {
+  int rounded = ((value + (kPicoLfoDepthStepPercent / 2)) / kPicoLfoDepthStepPercent) *
+                kPicoLfoDepthStepPercent;
+  return static_cast<uint8_t>(
+      clampValue<int>(rounded, kPicoLfoMinDepthPercent, kPicoLfoMaxDepthPercent));
+}
+
+inline uint8_t picoLfoDepthIndexFromPercent(int percent) {
+  uint8_t clamped = clampPicoLfoDepthPercent(percent);
+  return static_cast<uint8_t>((clamped - kPicoLfoMinDepthPercent) / kPicoLfoDepthStepPercent);
+}
+
+inline uint8_t picoLfoDepthPercentFromIndex(int index) {
+  return clampPicoLfoDepthPercent(
+      kPicoLfoMinDepthPercent + clampValue<int>(index, 0, kPicoLfoDepthStepCount - 1) *
+                                    kPicoLfoDepthStepPercent);
+}
+
+inline const char* picoOutputModeName(uint8_t mode) {
+  switch (clampPicoOutputMode(mode)) {
+    case kPicoOutputLfoLo:
+      return "lo";
+    case kPicoOutputLfoFm:
+      return "fm";
+    case kPicoOutputPedal:
+    default:
+      return "ped";
+  }
+}
+
+inline const char* picoOutputModeDisplayLabel(uint8_t mode) {
+  switch (clampPicoOutputMode(mode)) {
+    case kPicoOutputLfoLo:
+      return "LO";
+    case kPicoOutputLfoFm:
+      return "FM";
+    case kPicoOutputPedal:
+    default:
+      return "PED";
+  }
+}
+
+inline const char* picoLfoWaveName(uint8_t wave) {
+  switch (clampPicoLfoWave(wave)) {
+    case kPicoLfoTriangle:
+      return "triangle";
+    case kPicoLfoSawUp:
+      return "sawup";
+    case kPicoLfoSawDown:
+      return "sawdown";
+    case kPicoLfoSquare:
+      return "square";
+    case kPicoLfoPulse:
+      return "pulse";
+    case kPicoLfoSine:
+    default:
+      return "sine";
+  }
+}
+
+inline const char* picoLfoWaveDisplayLabel(uint8_t wave) {
+  switch (clampPicoLfoWave(wave)) {
+    case kPicoLfoTriangle:
+      return "TRI";
+    case kPicoLfoSawUp:
+      return "SAWUP";
+    case kPicoLfoSawDown:
+      return "SAWDN";
+    case kPicoLfoSquare:
+      return "SQR";
+    case kPicoLfoPulse:
+      return "PULS";
+    case kPicoLfoSine:
+    default:
+      return "SIN";
+  }
+}
+
+inline float computePicoLfoRateHz(uint8_t outputMode, uint8_t rateStep) {
+  uint8_t mode = clampPicoOutputMode(outputMode);
+  float minHz = mode == kPicoOutputLfoFm ? kPicoLfoFmMinHz : kPicoLfoLoMinHz;
+  float maxHz = mode == kPicoOutputLfoFm ? kPicoLfoFmMaxHz : kPicoLfoLoMaxHz;
+  uint8_t maxStep = picoLfoRateMaxStep(mode);
+  float t = maxStep == 0 ? 0.0f : static_cast<float>(clampPicoLfoRateStep(rateStep, mode)) /
+                                      static_cast<float>(maxStep);
+  return minHz * powf(maxHz / minHz, t);
+}
+
+inline float computePicoLfoRateHzForPedal(uint8_t outputMode, float pedal, uint8_t maxRateStep) {
+  uint8_t mode = clampPicoOutputMode(outputMode);
+  float minHz = mode == kPicoOutputLfoFm ? kPicoLfoFmMinHz : kPicoLfoLoMinHz;
+  float maxHz = mode == kPicoOutputLfoFm ? kPicoLfoFmMaxHz : kPicoLfoLoMaxHz;
+  uint8_t modeMaxStep = picoLfoRateMaxStep(mode);
+  uint8_t clampedMaxStep = clampPicoLfoRateStep(maxRateStep, mode);
+  float maxT = modeMaxStep == 0 ? 0.0f : static_cast<float>(clampedMaxStep) /
+                                           static_cast<float>(modeMaxStep);
+  float pedalT = clampValue(pedal, 0.0f, 1.0f);
+  return minHz * powf(maxHz / minHz, pedalT * maxT);
+}
+
+inline uint8_t nearestPicoLfoRateStep(uint8_t outputMode, float hz) {
+  uint8_t mode = clampPicoOutputMode(outputMode);
+  float minHz = mode == kPicoOutputLfoFm ? kPicoLfoFmMinHz : kPicoLfoLoMinHz;
+  float maxHz = mode == kPicoOutputLfoFm ? kPicoLfoFmMaxHz : kPicoLfoLoMaxHz;
+  uint8_t maxStep = picoLfoRateMaxStep(mode);
+  hz = clampValue(hz, minHz, maxHz);
+  float t = logf(hz / minHz) / logf(maxHz / minHz);
+  return clampPicoLfoRateStep(static_cast<int>(lroundf(t * maxStep)), mode);
+}
+
+inline float attenuatePicoLfoWaveValue(float value, uint8_t depthPercent) {
+  float depth = static_cast<float>(clampPicoLfoDepthPercent(depthPercent)) / 100.0f;
+  return clampValue(0.5f + (clampValue(value, 0.0f, 1.0f) - 0.5f) * depth, 0.0f, 1.0f);
+}
+
+inline float computePicoLfoWaveValue(float phase, uint8_t wave) {
+  phase = phase - floorf(phase);
+  if (phase < 0.0f) {
+    phase += 1.0f;
+  }
+
+  switch (clampPicoLfoWave(wave)) {
+    case kPicoLfoTriangle:
+      return phase < 0.5f ? phase * 2.0f : (1.0f - phase) * 2.0f;
+    case kPicoLfoSawUp:
+      return phase;
+    case kPicoLfoSawDown:
+      return 1.0f - phase;
+    case kPicoLfoSquare:
+      return phase < 0.5f ? 1.0f : 0.0f;
+    case kPicoLfoPulse:
+      return phase < 0.25f ? 1.0f : 0.0f;
+    case kPicoLfoSine:
+    default:
+      return 0.5f + 0.5f * sinf(phase * 6.28318530718f);
+  }
 }
 
 inline const char* picoCurveName(uint8_t mode) {

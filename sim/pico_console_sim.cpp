@@ -25,11 +25,22 @@ enum CalibrationState {
 };
 
 enum MenuItem {
+  MenuMode,
+  MenuWave,
+  MenuDepth,
   MenuCurve,
   MenuCal,
   MenuDir,
-  MenuExit,
+  MenuDone,
   MenuCount,
+};
+
+enum MenuEditField {
+  MenuEditNone,
+  MenuEditMode,
+  MenuEditWave,
+  MenuEditDepth,
+  MenuEditCurve,
 };
 
 struct Settings {
@@ -39,6 +50,11 @@ struct Settings {
   bool invert = false;
   PicoBendDirection bendDirection = kPicoBendUp;
   uint8_t curveMode = kPicoCurveLinear;
+  uint8_t outputMode = kPicoOutputPedal;
+  uint8_t lfoWave = kPicoLfoSine;
+  uint8_t lfoLoRate = kPicoLfoLoRateSteps;
+  uint8_t lfoFmRate = kPicoLfoFmRateSteps;
+  uint8_t lfoDepthPercent = kPicoLfoMaxDepthPercent;
   uint16_t rangeMv = 3300;
   uint16_t responseCents = kDefaultFullScaleResponseCents;
   uint16_t toeMapMv[kPicoSemitoneMapCount] = {};
@@ -62,7 +78,7 @@ class PicoConsoleSim {
     lastActivityRaw = 0;
     advanceMs(250);
 
-    printf("BOOT Precision Expression Controller Pico SIM\n");
+    printf("BOOT Therevox Expression Controller SIM\n");
     printf("SERIAL: MCP4725 %s at 0x62\n", dacPresent ? "PASS" : "FAIL");
     printf("SERIAL: SSD1306 %s at 0x3C\n", oledPresent ? "PASS" : "FAIL");
     printStatus("boot");
@@ -158,6 +174,37 @@ class PicoConsoleSim {
     printf("SERIAL: OK curve %s\n", picoCurveName(settings.curveMode));
   }
 
+  void commandMode(uint8_t outputMode) {
+    settings.outputMode = clampPicoOutputMode(outputMode);
+    lfoPhase = 0.0f;
+    tuneMode = false;
+    markDirty();
+    printf("SERIAL: OK mode %s\n", picoOutputModeName(settings.outputMode));
+  }
+
+  void commandWave(uint8_t wave) {
+    settings.lfoWave = clampPicoLfoWave(wave);
+    lfoPhase = 0.0f;
+    markDirty();
+    printf("SERIAL: OK wave %s\n", picoLfoWaveName(settings.lfoWave));
+  }
+
+  void commandRateStep(int step) {
+    if (settings.outputMode == kPicoOutputLfoFm) {
+      settings.lfoFmRate = clampPicoLfoRateStep(step, settings.outputMode);
+    } else {
+      settings.lfoLoRate = clampPicoLfoRateStep(step, settings.outputMode);
+    }
+    markDirty();
+    printf("SERIAL: OK max rate %.3fHz step=%u\n", configuredLfoMaxRateHz(), currentLfoRateStep());
+  }
+
+  void commandDepth(int percent) {
+    settings.lfoDepthPercent = clampPicoLfoDepthPercent(percent);
+    markDirty();
+    printf("SERIAL: OK depth %u%%\n", settings.lfoDepthPercent);
+  }
+
   void turnEncoder(int detents) {
     int direction = detents >= 0 ? 1 : -1;
     for (int i = 0; i < abs(detents); ++i) {
@@ -169,11 +216,14 @@ class PicoConsoleSim {
         continue;
       }
       if (menuActive) {
-        int next = static_cast<int>(menuIndex) + direction;
-        while (next < 0) {
-          next += MenuCount;
+        if (menuEditField != MenuEditNone) {
+          menuEditValue = wrapMenuChoice(
+              static_cast<int>(menuEditValue) + direction,
+              menuEditValueCount(menuEditField));
+        } else {
+          menuIndex = static_cast<MenuItem>(
+              wrapMenuChoice(static_cast<int>(menuIndex) + direction, MenuCount));
         }
-        menuIndex = static_cast<MenuItem>(next % MenuCount);
         continue;
       }
       if (tuneMode) {
@@ -186,6 +236,11 @@ class PicoConsoleSim {
                 0,
                 kMaxOutputMv));
         markDirty();
+        continue;
+      }
+      if (outputModeIsLfo()) {
+        commandDepth(static_cast<int>(settings.lfoDepthPercent) +
+                     direction * static_cast<int>(kPicoLfoDepthStepPercent));
         continue;
       }
       int nextMagnitude = static_cast<int>(picoIntervalMagnitude(settings.semitones)) + direction;
@@ -203,7 +258,18 @@ class PicoConsoleSim {
              label,
              settings.toeMapMv[picoSemitoneMapIndex(settings.semitones)]);
     } else if (menuActive) {
-      printf("ENCODER: turn %+d detents -> menu %s\n", detents, menuItemTitle(menuIndex));
+      if (menuEditField != MenuEditNone) {
+        printf("ENCODER: turn %+d detents -> %s %s\n",
+               detents,
+               menuEditTitle(menuEditField),
+               menuEditValueLabel(menuEditField, menuEditValue));
+      } else {
+        printf("ENCODER: turn %+d detents -> menu %s\n", detents, menuItemTitle(menuIndex));
+      }
+    } else if (outputModeIsLfo()) {
+      printf("ENCODER: turn %+d detents -> depth %u%%\n",
+             detents,
+             settings.lfoDepthPercent);
     } else {
       printf("ENCODER: turn %+d detents -> %s\n", detents, label);
     }
@@ -246,9 +312,14 @@ class PicoConsoleSim {
       return;
     }
 
-    settings.semitones = signedPicoInterval(0, settings.bendDirection);
-    markDirty();
-    printf("ENCODER: short press -> unison interval\n");
+    if (outputModeIsLfo()) {
+      lfoPhase = 0.0f;
+      printf("ENCODER: short press -> LFO sync\n");
+    } else {
+      settings.semitones = signedPicoInterval(0, settings.bendDirection);
+      markDirty();
+      printf("ENCODER: short press -> unison interval\n");
+    }
   }
 
   void doubleClickEncoder() {
@@ -268,7 +339,8 @@ class PicoConsoleSim {
 
     if (holdMs >= 2000 && calState == CalIdle) {
       menuActive = !menuActive;
-      menuIndex = MenuCurve;
+      menuIndex = MenuMode;
+      menuEditField = MenuEditNone;
       printf("ENCODER: hold %ums -> menu %s\n", holdMs, menuActive ? "open" : "closed");
       return;
     }
@@ -303,6 +375,14 @@ class PicoConsoleSim {
     return menuActive;
   }
 
+  bool isMenuEditing() const {
+    return menuEditField != MenuEditNone;
+  }
+
+  float liveLfoRateHz() const {
+    return currentLfoRateHz();
+  }
+
   Settings currentSettings() const {
     return settings;
   }
@@ -312,12 +392,13 @@ class PicoConsoleSim {
     signedIntervalLabel(label, sizeof(label));
 
     printf("\n== %s ==\n", title);
-    printf("SERIAL: raw=%u norm=%.4f filt=%.4f interval=%s semis=%d dir=%s noBendMv=%.3f outMv=%.3f dacCode=%u tune=%s stepMv=%u responseCents=%u curve=%s cv=%s dac=%s oled=%s cal=%s menu=%s sleep=%s heel=%u toe=%u invert=%s dirty=%s\n",
+    printf("SERIAL: raw=%u norm=%.4f filt=%.4f interval=%s semis=%d mode=%s dir=%s noBendMv=%.3f outMv=%.3f dacCode=%u tune=%s stepMv=%u responseCents=%u curve=%s wave=%s rateHz=%.3f maxRateHz=%.3f depth=%u%% cv=%s dac=%s oled=%s cal=%s menu=%s sleep=%s heel=%u toe=%u invert=%s dirty=%s\n",
            pedalState.raw,
            pedalState.normalized,
            pedalState.filtered,
            label,
            settings.semitones,
+           picoOutputModeName(settings.outputMode),
            directionLabel(),
            noBendMicrovolts() / 1000.0,
            outputMicrovolts / 1000.0,
@@ -326,6 +407,10 @@ class PicoConsoleSim {
            tuneStepMv,
            settings.responseCents,
            picoCurveName(settings.curveMode),
+           picoLfoWaveName(settings.lfoWave),
+           currentLfoRateHz(),
+           configuredLfoMaxRateHz(),
+           settings.lfoDepthPercent,
            cvOverride ? "on" : "off",
            dacPresent ? "ready" : "missing",
            oledPresent ? "ready" : "missing",
@@ -358,7 +443,10 @@ class PicoConsoleSim {
   bool tuneMode = false;
   bool cvOverride = false;
   bool menuActive = false;
-  MenuItem menuIndex = MenuCurve;
+  MenuItem menuIndex = MenuMode;
+  MenuEditField menuEditField = MenuEditNone;
+  uint8_t menuEditValue = 0;
+  float lfoPhase = 0.0f;
   uint16_t cvOverrideMv = 0;
   uint16_t tuneStepMv = kDefaultTuneStepMv;
 
@@ -430,6 +518,16 @@ class PicoConsoleSim {
 
     if (cvOverride) {
       outputMicrovolts = static_cast<int32_t>(cvOverrideMv) * 1000L;
+    } else if (outputModeIsLfo()) {
+      lfoPhase += currentLfoRateHz() * 0.001f;
+      lfoPhase -= floorf(lfoPhase);
+      float value = computePicoLfoWaveValue(lfoPhase, settings.lfoWave);
+      if (settings.bendDirection == kPicoBendDown) {
+        value = 1.0f - value;
+      }
+      value = attenuatePicoLfoWaveValue(value, settings.lfoDepthPercent);
+      outputMicrovolts =
+          static_cast<int32_t>(lroundf(value * static_cast<float>(kPicoDacFullScaleMicrovolts)));
     } else {
       outputMicrovolts =
           computePicoMappedOutputMicrovolts(
@@ -487,6 +585,22 @@ class PicoConsoleSim {
     return settings.bendDirection == kPicoBendDown ? "DOWN" : "UP";
   }
 
+  bool outputModeIsLfo() const {
+    return settings.outputMode == kPicoOutputLfoLo || settings.outputMode == kPicoOutputLfoFm;
+  }
+
+  uint8_t currentLfoRateStep() const {
+    return settings.outputMode == kPicoOutputLfoFm ? settings.lfoFmRate : settings.lfoLoRate;
+  }
+
+  float currentLfoRateHz() const {
+    return computePicoLfoRateHzForPedal(settings.outputMode, pedalState.filtered, currentLfoRateStep());
+  }
+
+  float configuredLfoMaxRateHz() const {
+    return computePicoLfoRateHz(settings.outputMode, currentLfoRateStep());
+  }
+
   int32_t noBendMicrovolts() const {
     return picoUnipolarNoBendMicrovolts(settings.bendDirection);
   }
@@ -513,30 +627,154 @@ class PicoConsoleSim {
 
   const char* menuItemTitle(MenuItem item) const {
     switch (item) {
+      case MenuMode:
+        return "MODE";
+      case MenuWave:
+        return "WAVE";
+      case MenuDepth:
+        return "DEPTH";
       case MenuCurve:
         return "CURVE";
       case MenuCal:
         return "CAL";
       case MenuDir:
-        return "DIR";
-      case MenuExit:
+        return outputModeIsLfo() ? "POL" : "DIR";
+      case MenuDone:
         return "DONE";
       default:
         return "MENU";
     }
   }
 
-  void selectMenuItem() {
-    switch (menuIndex) {
-      case MenuCurve:
-        settings.curveMode = static_cast<uint8_t>((settings.curveMode + 1) % kPicoCurveCount);
-        configureProcessor();
-        markDirty();
+  uint8_t wrapMenuChoice(int value, int count) const {
+    if (count <= 0) {
+      return 0;
+    }
+    while (value < 0) {
+      value += count;
+    }
+    return static_cast<uint8_t>(value % count);
+  }
+
+  const char* menuEditTitle(MenuEditField field) const {
+    switch (field) {
+      case MenuEditMode:
+        return "SET MODE";
+      case MenuEditWave:
+        return "SET WAVE";
+      case MenuEditDepth:
+        return "SET DEP";
+      case MenuEditCurve:
+        return "SET CURVE";
+      default:
+        return "SET";
+    }
+  }
+
+  uint8_t menuEditValueCount(MenuEditField field) const {
+    switch (field) {
+      case MenuEditMode:
+        return kPicoOutputModeCount;
+      case MenuEditWave:
+        return kPicoLfoWaveCount;
+      case MenuEditDepth:
+        return kPicoLfoDepthStepCount;
+      case MenuEditCurve:
+        return kPicoCurveCount;
+      default:
+        return 1;
+    }
+  }
+
+  uint8_t currentMenuEditValue(MenuEditField field) const {
+    switch (field) {
+      case MenuEditMode:
+        return settings.outputMode;
+      case MenuEditWave:
+        return settings.lfoWave;
+      case MenuEditDepth:
+        return picoLfoDepthIndexFromPercent(settings.lfoDepthPercent);
+      case MenuEditCurve:
+        return settings.curveMode;
+      default:
+        return 0;
+    }
+  }
+
+  const char* menuEditValueLabel(MenuEditField field, uint8_t value) const {
+    switch (field) {
+      case MenuEditMode:
+        return picoOutputModeDisplayLabel(value);
+      case MenuEditWave:
+        return picoLfoWaveDisplayLabel(value);
+      case MenuEditDepth: {
+        static char depth[8];
+        snprintf(depth, sizeof(depth), "%u%%", picoLfoDepthPercentFromIndex(value));
+        return depth;
+      }
+      case MenuEditCurve:
+        return picoCurveDisplayLabel(value);
+      default:
+        return "";
+    }
+  }
+
+  void beginMenuEdit(MenuEditField field) {
+    menuEditField = field;
+    menuEditValue = currentMenuEditValue(field);
+    printf("ENCODER: menu edit %s %s\n",
+           menuEditTitle(menuEditField),
+           menuEditValueLabel(menuEditField, menuEditValue));
+  }
+
+  void commitMenuEdit() {
+    MenuEditField field = menuEditField;
+    uint8_t value = menuEditValue;
+    switch (field) {
+      case MenuEditMode:
+        commandMode(value);
         save();
-        printf("ENCODER: menu curve -> %s\n", picoCurveName(settings.curveMode));
+        break;
+      case MenuEditWave:
+        commandWave(value);
+        save();
+        break;
+      case MenuEditDepth:
+        commandDepth(picoLfoDepthPercentFromIndex(value));
+        save();
+        break;
+      case MenuEditCurve:
+        commandCurve(value);
+        save();
+        break;
+      default:
+        break;
+    }
+    menuEditField = MenuEditNone;
+  }
+
+  void selectMenuItem() {
+    if (menuEditField != MenuEditNone) {
+      commitMenuEdit();
+      return;
+    }
+
+    switch (menuIndex) {
+      case MenuMode:
+        beginMenuEdit(MenuEditMode);
+        break;
+      case MenuWave:
+        beginMenuEdit(MenuEditWave);
+        break;
+      case MenuDepth:
+        beginMenuEdit(MenuEditDepth);
+        break;
+      case MenuCurve:
+        beginMenuEdit(MenuEditCurve);
         break;
       case MenuCal:
         menuActive = false;
+        menuEditField = MenuEditNone;
         calState = CalWaitHeel;
         printf("ENCODER: menu cal -> CAL HEEL\n");
         break;
@@ -545,9 +783,10 @@ class PicoConsoleSim {
         save();
         printf("ENCODER: menu dir -> %s\n", directionLabel());
         break;
-      case MenuExit:
+      case MenuDone:
       default:
         menuActive = false;
+        menuEditField = MenuEditNone;
         printf("ENCODER: menu exit\n");
         break;
     }
@@ -564,32 +803,53 @@ class PicoConsoleSim {
     }
     if (menuActive) {
       printf("OLED:\n");
-      printf("  MENU     %s %s\n",
-             menuItemTitle(menuIndex),
-             menuIndex == MenuCurve ? picoCurveDisplayLabel(settings.curveMode)
-                                    : (menuIndex == MenuDir ? directionLabel() : ""));
-      printf("          TURN SEL PRESS OK\n");
+      if (menuEditField != MenuEditNone) {
+        printf("  %-8s %s\n",
+               menuEditTitle(menuEditField),
+               menuEditValueLabel(menuEditField, menuEditValue));
+        printf("          TURN PRESS OK\n");
+      } else {
+        char depthLabel[8];
+        snprintf(depthLabel, sizeof(depthLabel), "%u%%", settings.lfoDepthPercent);
+        printf("  MENU     %s %s\n",
+               menuItemTitle(menuIndex),
+               menuIndex == MenuMode   ? picoOutputModeDisplayLabel(settings.outputMode)
+               : menuIndex == MenuWave ? picoLfoWaveDisplayLabel(settings.lfoWave)
+               : menuIndex == MenuDepth ? depthLabel
+               : menuIndex == MenuCurve ? picoCurveDisplayLabel(settings.curveMode)
+               : menuIndex == MenuDir   ? directionLabel()
+                                        : "");
+        printf("          TURN ITEM PRESS OK\n");
+      }
       return;
     }
 
     char label[8];
     if (cvOverride) {
       snprintf(label, sizeof(label), "CV");
+    } else if (outputModeIsLfo()) {
+      snprintf(label, sizeof(label), "%s", picoOutputModeDisplayLabel(settings.outputMode));
     } else {
       signedIntervalLabel(label, sizeof(label));
     }
-    int32_t toeUv =
-        cvOverride
-            ? static_cast<int32_t>(cvOverrideMv) * 1000L
-            : toeMicrovoltsForCurrentInterval();
 
     printf("OLED:\n");
-    printf("  %-5s   %s %4ldMV\n",
-           label,
-           cvOverride ? "SET" : "TOE",
-           static_cast<long>(toeUv / 1000));
+    if (outputModeIsLfo() && !cvOverride) {
+      printf("  %-5s   SPD PED\n", label);
+    } else {
+      int32_t toeUv =
+          cvOverride
+              ? static_cast<int32_t>(cvOverrideMv) * 1000L
+              : toeMicrovoltsForCurrentInterval();
+      printf("  %-5s   %s %4ldMV\n",
+             label,
+             cvOverride ? "SET" : "TOE",
+             static_cast<long>(toeUv / 1000));
+    }
     if (cvOverride) {
       printf("          FIXED\n");
+    } else if (outputModeIsLfo()) {
+      printf("          DEP %u%%\n", settings.lfoDepthPercent);
     } else if (tuneMode) {
       printf("          STEP %uMV\n", tuneStepMv);
     } else if (settings.responseCents > 0) {
@@ -597,7 +857,13 @@ class PicoConsoleSim {
     } else {
       printf("          RNG %uMV\n", settings.rangeMv);
     }
-    printf("          CRV %s\n", picoCurveDisplayLabel(settings.curveMode));
+    if (outputModeIsLfo()) {
+      printf("          %s %s\n",
+             picoLfoWaveDisplayLabel(settings.lfoWave),
+             settings.bendDirection == kPicoBendDown ? "DN" : "UP");
+    } else {
+      printf("          CRV %s\n", picoCurveDisplayLabel(settings.curveMode));
+    }
     printf("  %s\n",
            dacPresent
                ? (cvOverride ? "CV HOLD" : (tuneMode ? "TUNE" : directionLabel()))
@@ -720,17 +986,76 @@ void runScriptedSimulation() {
 
   sim.holdEncoder(2000);
   assert(sim.isMenuActive());
+  assert(!sim.isMenuEditing());
   sim.shortPressEncoder();
   assert(sim.isMenuActive());
-  assert(sim.currentSettings().curveMode == kPicoCurveEaseOut);
-  sim.turnEncoder(2);
+  assert(sim.isMenuEditing());
+  sim.turnEncoder(1);
+  sim.shortPressEncoder();
+  assert(sim.isMenuActive());
+  assert(!sim.isMenuEditing());
+  assert(sim.currentSettings().outputMode == kPicoOutputLfoLo);
+  sim.turnEncoder(1);
+  sim.shortPressEncoder();
+  assert(sim.isMenuEditing());
+  sim.turnEncoder(1);
+  sim.shortPressEncoder();
+  assert(!sim.isMenuEditing());
+  assert(sim.currentSettings().lfoWave == kPicoLfoTriangle);
+  sim.turnEncoder(1);
+  sim.shortPressEncoder();
+  assert(sim.isMenuEditing());
+  sim.turnEncoder(-5);
+  sim.shortPressEncoder();
+  assert(!sim.isMenuEditing());
+  assert(sim.currentSettings().lfoDepthPercent == 75);
+  sim.turnEncoder(3);
   sim.shortPressEncoder();
   assert(sim.currentSettings().bendDirection == kPicoBendDown);
   sim.turnEncoder(1);
   sim.shortPressEncoder();
   assert(!sim.isMenuActive());
   sim.commandDirection(kPicoBendUp);
+  sim.commandMode(kPicoOutputPedal);
   sim.commandCurve(kPicoCurveLinear);
+
+  sim.commandMode(kPicoOutputLfoLo);
+  sim.commandWave(kPicoLfoSine);
+  sim.commandDepth(100);
+  sim.commandRateStep(kPicoLfoLoRateSteps);
+  sim.setPedalRaw(0);
+  assert(sim.liveLfoRateHz() > 0.049f && sim.liveLfoRateHz() < 0.060f);
+  sim.setPedalRaw(2048);
+  assert(sim.liveLfoRateHz() > 0.90f && sim.liveLfoRateHz() < 1.12f);
+  sim.setPedalRaw(4095);
+  assert(sim.liveLfoRateHz() > 18.0f && sim.liveLfoRateHz() < 20.1f);
+  sim.setPedalRaw(2048);
+  int8_t previousSemitones = sim.currentSettings().semitones;
+  sim.turnEncoder(-2);
+  assert(sim.currentSettings().semitones == previousSemitones);
+  assert(sim.currentSettings().lfoDepthPercent == 90);
+  sim.commandDepth(100);
+  sim.shortPressEncoder();
+  sim.advanceMs(250);
+  sim.printStatus("LO LFO one quarter cycle");
+  expectNearMv("LO sine quarter cycle", sim.snapshot(), 3300.0f, 120.0f);
+  sim.commandDepth(75);
+  sim.shortPressEncoder();
+  sim.advanceMs(250);
+  sim.printStatus("LO LFO one quarter cycle depth 75");
+  expectNearMv("LO sine quarter cycle depth 75", sim.snapshot(), 2887.5f, 120.0f);
+  sim.doubleClickEncoder();
+  sim.advanceMs(250);
+  sim.printStatus("LO LFO inverted");
+  expectNearMv("LO sine inverted half cycle", sim.snapshot(), 1650.0f, 80.0f);
+  sim.commandDirection(kPicoBendUp);
+  sim.commandMode(kPicoOutputLfoFm);
+  sim.commandWave(kPicoLfoSquare);
+  sim.commandRateStep(kPicoLfoFmRateSteps);
+  sim.setPedalRaw(4095);
+  assert(sim.liveLfoRateHz() > 150.0f && sim.liveLfoRateHz() < 160.5f);
+  sim.printStatus("FM square LFO");
+  sim.commandMode(kPicoOutputPedal);
 
   sim.turnEncoder(24);
   assert(sim.currentSettings().semitones == kPicoMaxSemitones);
@@ -743,7 +1068,7 @@ void runScriptedSimulation() {
   sim.printStatus("encoder center and autosave");
 
   sim.holdEncoder(2000);
-  sim.turnEncoder(1);
+  sim.turnEncoder(4);
   sim.shortPressEncoder();
   sim.setPedalRaw(137, 200);
   sim.shortPressEncoder();
@@ -767,7 +1092,7 @@ void runScriptedSimulation() {
   sim.printStatus("pedal movement stays awake");
 
   printf("\nSIM RESULT: PASS\n");
-  printf("Verified: one-direction UP/DOWN 6th-limited rails, fixed CV override, curve modes, OLED menu, tune-mode toe trimming, DAC codes, OLED text output, encoder stepping, double-click direction behavior, calibration, autosave, and bench idle-sleep disabled.\n");
+  printf("Verified: one-direction UP/DOWN 6th-limited rails, fixed CV override, curve modes, LO/FM pedal-rate and depth controls, LFO waveform controls, OLED menu pickers, tune-mode toe trimming, DAC codes, OLED text output, encoder stepping, double-click direction behavior, calibration, autosave, and bench idle-sleep disabled.\n");
 }
 
 }  // namespace

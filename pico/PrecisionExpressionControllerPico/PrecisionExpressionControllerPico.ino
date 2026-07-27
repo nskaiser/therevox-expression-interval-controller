@@ -1,4 +1,4 @@
-// Precision Expression Controller - Raspberry Pi Pico H prototype
+// Therevox Expression Controller - Raspberry Pi Pico H prototype
 //
 // Hardware target:
 //   Raspberry Pi Pico H
@@ -33,10 +33,13 @@
 //   Encoder other switch lug    -> GND
 //
 // Control model:
-//   One direction is active at a time.
+//   PED mode: expression pedal controls calibrated interval bend.
 //   UP mode:   heel/no-bend 0.000 V, top interval +6 / 9 semitones.
 //   DOWN mode: heel/no-bend 3.300 V, bottom interval -6 / -9 semitones.
-//   Double-click the encoder to toggle UP/DOWN.
+//   LO mode: slow unipolar LFO, 0.05-20 Hz.
+//   FM mode: faster unipolar LFO, 8-160 Hz.
+//   In LO/FM, the expression pedal sweeps LFO speed and the encoder sets depth.
+//   Double-click the encoder to toggle UP/DOWN or LFO polarity.
 //
 // Tune/calibrate the Therevox with the controller connected and the pedal at heel.
 
@@ -46,6 +49,7 @@
 #include <stddef.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #if defined(__has_include)
@@ -95,7 +99,8 @@ constexpr uint32_t CAL_PROMPT_MS = 60UL * 1000UL;
 constexpr bool IDLE_SLEEP_ENABLED = false;
 constexpr uint32_t IDLE_SLEEP_MS = 60UL * 60UL * 1000UL;
 constexpr uint32_t SETTINGS_AUTOSAVE_MS = 3000;
-constexpr uint32_t DAC_WRITE_MIN_INTERVAL_US = 5000;
+constexpr uint32_t DAC_PEDAL_WRITE_MIN_INTERVAL_US = 5000;
+constexpr uint32_t DAC_LFO_WRITE_MIN_INTERVAL_US = 1000;
 constexpr uint16_t DAC_CODE_DEADBAND = 2;
 constexpr uint16_t PEDAL_ACTIVITY_RAW_DELTA = 8;
 constexpr uint16_t MIN_CAL_SPAN_RAW = 128;
@@ -106,7 +111,7 @@ constexpr uint8_t DISPLAY_WIDTH = 128;
 constexpr uint8_t DISPLAY_HEIGHT = 32;
 constexpr uint16_t DISPLAY_BUFFER_SIZE = DISPLAY_WIDTH * DISPLAY_HEIGHT / 8;
 constexpr uint32_t SETTINGS_MAGIC = 0x5049434FUL; // PICO
-constexpr uint16_t SETTINGS_VERSION = 8;
+constexpr uint16_t SETTINGS_VERSION = 10;
 constexpr uint16_t DEFAULT_RANGE_MV = static_cast<uint16_t>(kDefaultUnipolarOctaveMicrovolts / 1000L);
 constexpr uint16_t MAX_OUTPUT_MV = static_cast<uint16_t>(kPicoDacFullScaleMicrovolts / 1000L);
 constexpr uint16_t MAX_OCTAVE_SCALE_MV = MAX_OUTPUT_MV;
@@ -124,6 +129,11 @@ struct PicoSettings {
   uint8_t monitorEnabled;
   uint8_t bendDirection;
   uint8_t curveMode;
+  uint8_t outputMode;
+  uint8_t lfoWave;
+  uint8_t lfoLoRate;
+  uint8_t lfoFmRate;
+  uint8_t lfoDepthPercent;
   uint16_t rangeMv;
   uint16_t responseCents;
   uint16_t toeMapMv[kPicoSemitoneMapCount];
@@ -137,11 +147,22 @@ enum CalibrationState {
 };
 
 enum MenuItem : uint8_t {
-  MENU_CURVE = 0,
-  MENU_CAL = 1,
-  MENU_DIR = 2,
-  MENU_EXIT = 3,
-  MENU_COUNT = 4,
+  MENU_MODE = 0,
+  MENU_WAVE = 1,
+  MENU_DEPTH = 2,
+  MENU_CURVE = 3,
+  MENU_CAL = 4,
+  MENU_DIR = 5,
+  MENU_DONE = 6,
+  MENU_COUNT = 7,
+};
+
+enum MenuEditField : uint8_t {
+  MENU_EDIT_NONE = 0,
+  MENU_EDIT_MODE,
+  MENU_EDIT_WAVE,
+  MENU_EDIT_DEPTH,
+  MENU_EDIT_CURVE,
 };
 
 uint16_t microvoltsToMillivolts(int32_t microvolts) {
@@ -238,11 +259,22 @@ bool lastRenderedCvOverrideEnabled = false;
 uint16_t lastRenderedCvOverrideMv = 0xffff;
 bool lastRenderedMenuActive = false;
 uint8_t lastRenderedMenuIndex = 0xff;
+uint8_t lastRenderedMenuEditField = 0xff;
+uint8_t lastRenderedMenuEditValue = 0xff;
 uint8_t lastRenderedCurveMode = 0xff;
 uint8_t lastRenderedBendDirection = 0xff;
+uint8_t lastRenderedOutputMode = 0xff;
+uint8_t lastRenderedLfoWave = 0xff;
+uint8_t lastRenderedLfoLoRate = 0xff;
+uint8_t lastRenderedLfoFmRate = 0xff;
+uint8_t lastRenderedLfoDepthPercent = 0xff;
 
 bool menuActive = false;
-uint8_t menuIndex = MENU_CURVE;
+uint8_t menuIndex = MENU_MODE;
+uint8_t menuEditField = MENU_EDIT_NONE;
+uint8_t menuEditValue = 0;
+float lfoPhase = 0.0f;
+uint32_t lastLfoUs = 0;
 
 volatile uint8_t lastEncoderState = 0;
 volatile int8_t encoderTransitionCount = 0;
@@ -292,6 +324,13 @@ bool settingsValid(const PicoSettings& value) {
          value.responseCents <= 6000 &&
          value.bendDirection <= static_cast<uint8_t>(kPicoBendDown) &&
          value.curveMode < kPicoCurveCount &&
+         value.outputMode < kPicoOutputModeCount &&
+         value.lfoWave < kPicoLfoWaveCount &&
+         value.lfoLoRate <= kPicoLfoLoRateSteps &&
+         value.lfoFmRate <= kPicoLfoFmRateSteps &&
+         value.lfoDepthPercent >= kPicoLfoMinDepthPercent &&
+         value.lfoDepthPercent <= kPicoLfoMaxDepthPercent &&
+         ((value.lfoDepthPercent - kPicoLfoMinDepthPercent) % kPicoLfoDepthStepPercent == 0) &&
          toeMapValid(value) &&
          value.semitones >= kPicoMinSemitones &&
          value.semitones <= kPicoMaxSemitones &&
@@ -309,6 +348,11 @@ PicoSettings makeDefaultPicoSettings() {
   value.monitorEnabled = 1;
   value.bendDirection = static_cast<uint8_t>(kPicoBendUp);
   value.curveMode = kPicoCurveLinear;
+  value.outputMode = kPicoOutputPedal;
+  value.lfoWave = kPicoLfoSine;
+  value.lfoLoRate = kPicoLfoLoRateSteps;
+  value.lfoFmRate = kPicoLfoFmRateSteps;
+  value.lfoDepthPercent = kPicoLfoMaxDepthPercent;
   value.rangeMv = DEFAULT_RANGE_MV;
   value.responseCents = kDefaultFullScaleResponseCents;
   fillToeMapFromCurrentFit(value);
@@ -350,8 +394,15 @@ void forceDisplayUpdate() {
   lastRenderedCvOverrideMv = 0xffff;
   lastRenderedMenuActive = false;
   lastRenderedMenuIndex = 0xff;
+  lastRenderedMenuEditField = 0xff;
+  lastRenderedMenuEditValue = 0xff;
   lastRenderedCurveMode = 0xff;
   lastRenderedBendDirection = 0xff;
+  lastRenderedOutputMode = 0xff;
+  lastRenderedLfoWave = 0xff;
+  lastRenderedLfoLoRate = 0xff;
+  lastRenderedLfoFmRate = 0xff;
+  lastRenderedLfoDepthPercent = 0xff;
 }
 
 void saveSettings() {
@@ -432,6 +483,26 @@ const char* directionLabel() {
   return currentBendDirection() == kPicoBendDown ? "DOWN" : "UP";
 }
 
+bool outputModeIsLfo() {
+  return settings.outputMode == kPicoOutputLfoLo || settings.outputMode == kPicoOutputLfoFm;
+}
+
+const char* outputModeLabel() {
+  return picoOutputModeName(settings.outputMode);
+}
+
+const char* outputModeDisplayLabel() {
+  return picoOutputModeDisplayLabel(settings.outputMode);
+}
+
+const char* lfoWaveLabel() {
+  return picoLfoWaveName(settings.lfoWave);
+}
+
+const char* lfoWaveDisplayLabel() {
+  return picoLfoWaveDisplayLabel(settings.lfoWave);
+}
+
 const char* curveLabel() {
   return picoCurveName(settings.curveMode);
 }
@@ -452,6 +523,32 @@ int32_t noBendOutputMicrovolts() {
   return picoUnipolarNoBendMicrovolts(currentBendDirection());
 }
 
+uint8_t currentLfoRateStep() {
+  return settings.outputMode == kPicoOutputLfoFm ? settings.lfoFmRate : settings.lfoLoRate;
+}
+
+float configuredLfoMaxRateHz() {
+  return computePicoLfoRateHz(settings.outputMode, currentLfoRateStep());
+}
+
+float currentLfoRateHz() {
+  return computePicoLfoRateHzForPedal(settings.outputMode, pedalState.filtered, currentLfoRateStep());
+}
+
+void formatLfoRate(char* out, size_t outSize, float hz) {
+  if (hz < 10.0f) {
+    snprintf(out, outSize, "%.2fHZ", hz);
+  } else if (hz < 100.0f) {
+    snprintf(out, outSize, "%.1fHZ", hz);
+  } else {
+    snprintf(out, outSize, "%.0fHZ", hz);
+  }
+}
+
+void formatLfoDepth(char* out, size_t outSize, uint8_t depthPercent) {
+  snprintf(out, outSize, "%u%%", clampPicoLfoDepthPercent(depthPercent));
+}
+
 int32_t toeOutputMicrovoltsForSemitone(int semitones) {
   if (clampPicoSemitones(semitones) == 0) {
     return noBendOutputMicrovolts();
@@ -462,7 +559,24 @@ int32_t toeOutputMicrovoltsForSemitone(int semitones) {
 void updateOutputFromPedalState() {
   if (cvOverrideEnabled) {
     currentOutputMicrovolts = static_cast<int32_t>(cvOverrideMv) * 1000L;
+  } else if (outputModeIsLfo()) {
+    uint32_t nowUs = micros();
+    float dt = lastLfoUs == 0 ? static_cast<float>(CONTROL_PERIOD_US) / 1000000.0f
+                              : static_cast<float>(nowUs - lastLfoUs) / 1000000.0f;
+    lastLfoUs = nowUs;
+    dt = clampValue(dt, 0.0f, 0.050f);
+    lfoPhase += currentLfoRateHz() * dt;
+    lfoPhase -= floorf(lfoPhase);
+
+    float value = computePicoLfoWaveValue(lfoPhase, settings.lfoWave);
+    if (currentBendDirection() == kPicoBendDown) {
+      value = 1.0f - value;
+    }
+    value = attenuatePicoLfoWaveValue(value, settings.lfoDepthPercent);
+    currentOutputMicrovolts = static_cast<int32_t>(
+        lroundf(value * static_cast<float>(kPicoDacFullScaleMicrovolts)));
   } else {
+    lastLfoUs = 0;
     currentOutputMicrovolts =
         computePicoMappedOutputMicrovolts(pedalState.curved,
                                           noBendOutputMicrovolts(),
@@ -508,8 +622,10 @@ void writeOutputToDac(bool force = false) {
     return;
   }
   uint32_t nowUs = micros();
+  uint32_t minIntervalUs = outputModeIsLfo() ? DAC_LFO_WRITE_MIN_INTERVAL_US
+                                             : DAC_PEDAL_WRITE_MIN_INTERVAL_US;
   if (!force &&
-      static_cast<uint32_t>(nowUs - lastDacWriteUs) < DAC_WRITE_MIN_INTERVAL_US) {
+      static_cast<uint32_t>(nowUs - lastDacWriteUs) < minIntervalUs) {
     return;
   }
 
@@ -668,6 +784,8 @@ uint16_t glyph3x5(char c) {
       return GLYPH3X5(5, 7, 7, 7, 5);
     case 'P':
       return GLYPH3X5(7, 5, 7, 4, 4);
+    case 'Q':
+      return GLYPH3X5(7, 5, 5, 7, 1);
     case 'R':
       return GLYPH3X5(7, 5, 6, 5, 5);
     case 'T':
@@ -680,6 +798,8 @@ uint16_t glyph3x5(char c) {
       return GLYPH3X5(5, 5, 7, 7, 5);
     case 'Y':
       return GLYPH3X5(5, 5, 2, 2, 2);
+    case 'Z':
+      return GLYPH3X5(7, 1, 2, 4, 7);
     case '+':
       return GLYPH3X5(0, 2, 7, 2, 0);
     case '-':
@@ -744,13 +864,19 @@ void sendDisplayBuffer() {
 
 const char* menuItemTitle(uint8_t item) {
   switch (item) {
+    case MENU_MODE:
+      return "MODE";
+    case MENU_WAVE:
+      return "WAVE";
+    case MENU_DEPTH:
+      return "DEPTH";
     case MENU_CURVE:
       return "CURVE";
     case MENU_CAL:
       return "CAL";
     case MENU_DIR:
-      return "DIR";
-    case MENU_EXIT:
+      return outputModeIsLfo() ? "POL" : "DIR";
+    case MENU_DONE:
       return "DONE";
     default:
       return "MENU";
@@ -759,14 +885,86 @@ const char* menuItemTitle(uint8_t item) {
 
 const char* menuItemValue(uint8_t item) {
   switch (item) {
+    case MENU_MODE:
+      return outputModeDisplayLabel();
+    case MENU_WAVE:
+      return lfoWaveDisplayLabel();
+    case MENU_DEPTH: {
+      static char depth[8];
+      formatLfoDepth(depth, sizeof(depth), settings.lfoDepthPercent);
+      return depth;
+    }
     case MENU_CURVE:
       return curveDisplayLabel();
     case MENU_CAL:
       return "PEDAL";
     case MENU_DIR:
       return directionLabel();
-    case MENU_EXIT:
+    case MENU_DONE:
       return "OK";
+    default:
+      return "";
+  }
+}
+
+const char* menuEditTitle(uint8_t field) {
+  switch (field) {
+    case MENU_EDIT_MODE:
+      return "SET MODE";
+    case MENU_EDIT_WAVE:
+      return "SET WAVE";
+    case MENU_EDIT_DEPTH:
+      return "SET DEP";
+    case MENU_EDIT_CURVE:
+      return "SET CURVE";
+    default:
+      return "SET";
+  }
+}
+
+uint8_t menuEditValueCount(uint8_t field) {
+  switch (field) {
+    case MENU_EDIT_MODE:
+      return kPicoOutputModeCount;
+    case MENU_EDIT_WAVE:
+      return kPicoLfoWaveCount;
+    case MENU_EDIT_DEPTH:
+      return kPicoLfoDepthStepCount;
+    case MENU_EDIT_CURVE:
+      return kPicoCurveCount;
+    default:
+      return 1;
+  }
+}
+
+uint8_t currentMenuEditValue(uint8_t field) {
+  switch (field) {
+    case MENU_EDIT_MODE:
+      return settings.outputMode;
+    case MENU_EDIT_WAVE:
+      return settings.lfoWave;
+    case MENU_EDIT_DEPTH:
+      return picoLfoDepthIndexFromPercent(settings.lfoDepthPercent);
+    case MENU_EDIT_CURVE:
+      return settings.curveMode;
+    default:
+      return 0;
+  }
+}
+
+const char* menuEditValueLabel(uint8_t field, uint8_t value) {
+  switch (field) {
+    case MENU_EDIT_MODE:
+      return picoOutputModeDisplayLabel(value);
+    case MENU_EDIT_WAVE:
+      return picoLfoWaveDisplayLabel(value);
+    case MENU_EDIT_DEPTH: {
+      static char depth[8];
+      formatLfoDepth(depth, sizeof(depth), picoLfoDepthPercentFromIndex(value));
+      return depth;
+    }
+    case MENU_EDIT_CURVE:
+      return picoCurveDisplayLabel(value);
     default:
       return "";
   }
@@ -804,26 +1002,46 @@ void renderDisplay() {
     if (!displayForceUpdate &&
         lastRenderedMenuActive &&
         lastRenderedMenuIndex == menuIndex &&
+        lastRenderedMenuEditField == menuEditField &&
+        lastRenderedMenuEditValue == menuEditValue &&
         lastRenderedCurveMode == settings.curveMode &&
         lastRenderedBendDirection == settings.bendDirection &&
+        lastRenderedOutputMode == settings.outputMode &&
+        lastRenderedLfoWave == settings.lfoWave &&
+        lastRenderedLfoLoRate == settings.lfoLoRate &&
+        lastRenderedLfoFmRate == settings.lfoFmRate &&
+        lastRenderedLfoDepthPercent == settings.lfoDepthPercent &&
         lastRenderedSettingsDirty == settingsDirty) {
       return;
     }
 
     clearDisplayBuffer();
-    char line[24];
-    snprintf(line, sizeof(line), "MENU %u/%u", static_cast<unsigned>(menuIndex + 1), MENU_COUNT);
-    drawText3x5(0, 0, line, 1);
-    drawText3x5(0, 10, menuItemTitle(menuIndex), 2);
-    drawText3x5(70, 10, menuItemValue(menuIndex), 2);
-    drawText3x5(0, 27, "TURN SEL PRESS OK", 1);
+    if (menuEditField != MENU_EDIT_NONE) {
+      drawText3x5(0, 0, menuEditTitle(menuEditField), 1);
+      drawText3x5(0, 10, menuEditValueLabel(menuEditField, menuEditValue), 3);
+      drawText3x5(0, 27, "TURN PRESS OK", 1);
+    } else {
+      char line[24];
+      snprintf(line, sizeof(line), "MENU %u/%u", static_cast<unsigned>(menuIndex + 1), MENU_COUNT);
+      drawText3x5(0, 0, line, 1);
+      drawText3x5(0, 10, menuItemTitle(menuIndex), 2);
+      drawText3x5(70, 10, menuItemValue(menuIndex), 2);
+      drawText3x5(0, 27, "TURN ITEM PRESS OK", 1);
+    }
     sendDisplayBuffer();
     displayForceUpdate = false;
     lastRenderedMessage = false;
     lastRenderedMenuActive = true;
     lastRenderedMenuIndex = menuIndex;
+    lastRenderedMenuEditField = menuEditField;
+    lastRenderedMenuEditValue = menuEditValue;
     lastRenderedCurveMode = settings.curveMode;
     lastRenderedBendDirection = settings.bendDirection;
+    lastRenderedOutputMode = settings.outputMode;
+    lastRenderedLfoWave = settings.lfoWave;
+    lastRenderedLfoLoRate = settings.lfoLoRate;
+    lastRenderedLfoFmRate = settings.lfoFmRate;
+    lastRenderedLfoDepthPercent = settings.lfoDepthPercent;
     lastRenderedSettingsDirty = settingsDirty;
     return;
   }
@@ -844,6 +1062,8 @@ void renderDisplay() {
   char label[8];
   if (cvOverrideEnabled) {
     snprintf(label, sizeof(label), "CV");
+  } else if (outputModeIsLfo()) {
+    snprintf(label, sizeof(label), "%s", outputModeDisplayLabel());
   } else {
     signedIntervalLabel(settings.semitones, label, sizeof(label));
   }
@@ -858,7 +1078,12 @@ void renderDisplay() {
       lastRenderedCvOverrideEnabled == cvOverrideEnabled &&
       lastRenderedCvOverrideMv == cvOverrideMv &&
       lastRenderedCurveMode == settings.curveMode &&
-      lastRenderedBendDirection == settings.bendDirection) {
+      lastRenderedBendDirection == settings.bendDirection &&
+      lastRenderedOutputMode == settings.outputMode &&
+      lastRenderedLfoWave == settings.lfoWave &&
+      lastRenderedLfoLoRate == settings.lfoLoRate &&
+      lastRenderedLfoFmRate == settings.lfoFmRate &&
+      lastRenderedLfoDepthPercent == settings.lfoDepthPercent) {
     return;
   }
 
@@ -866,17 +1091,20 @@ void renderDisplay() {
   drawText3x5(0, 0, label, 4);
 
   char line[24];
-  int32_t toeUv = cvOverrideEnabled
-                      ? static_cast<int32_t>(cvOverrideMv) * 1000L
-                      : toeOutputMicrovoltsForSemitone(settings.semitones);
-  snprintf(line,
-           sizeof(line),
-           cvOverrideEnabled ? "SET %ldMV" : "TOE %ldMV",
-           static_cast<long>(toeUv / 1000));
+  if (cvOverrideEnabled) {
+    snprintf(line, sizeof(line), "SET %uMV", cvOverrideMv);
+  } else if (outputModeIsLfo()) {
+    snprintf(line, sizeof(line), "SPD PED");
+  } else {
+    int32_t toeUv = toeOutputMicrovoltsForSemitone(settings.semitones);
+    snprintf(line, sizeof(line), "TOE %ldMV", static_cast<long>(toeUv / 1000));
+  }
   drawText3x5(70, 1, line, 1);
 
   if (cvOverrideEnabled) {
     snprintf(line, sizeof(line), "FIXED");
+  } else if (outputModeIsLfo()) {
+    snprintf(line, sizeof(line), "DEP %u%%", settings.lfoDepthPercent);
   } else if (tuneMode) {
     snprintf(line, sizeof(line), "STEP %uMV", tuneStepMv);
   } else if (settings.responseCents > 0) {
@@ -886,7 +1114,15 @@ void renderDisplay() {
   }
   drawText3x5(70, 10, line, 1);
 
-  snprintf(line, sizeof(line), "CRV %s", curveDisplayLabel());
+  if (outputModeIsLfo()) {
+    snprintf(line,
+             sizeof(line),
+             "%s %s",
+             lfoWaveDisplayLabel(),
+             currentBendDirection() == kPicoBendDown ? "DN" : "UP");
+  } else {
+    snprintf(line, sizeof(line), "CRV %s", curveDisplayLabel());
+  }
   drawText3x5(70, 19, line, 1);
 
   if (!dacReady) {
@@ -895,6 +1131,9 @@ void renderDisplay() {
     drawText3x5(0, 27, "CV HOLD", 1);
   } else if (tuneMode) {
     drawText3x5(0, 27, "TUNE", 1);
+  } else if (outputModeIsLfo()) {
+    snprintf(line, sizeof(line), "LFO %s", settingsDirty ? "DIRTY" : "SAVED");
+    drawText3x5(0, 27, line, 1);
   } else {
     snprintf(line,
              sizeof(line),
@@ -917,6 +1156,11 @@ void renderDisplay() {
   lastRenderedCvOverrideMv = cvOverrideMv;
   lastRenderedCurveMode = settings.curveMode;
   lastRenderedBendDirection = settings.bendDirection;
+  lastRenderedOutputMode = settings.outputMode;
+  lastRenderedLfoWave = settings.lfoWave;
+  lastRenderedLfoLoRate = settings.lfoLoRate;
+  lastRenderedLfoFmRate = settings.lfoFmRate;
+  lastRenderedLfoDepthPercent = settings.lfoDepthPercent;
 }
 
 void renderDisplayNow() {
@@ -947,8 +1191,23 @@ void printStatus() {
   Serial.print(settings.semitones);
   Serial.print(F(" outMv="));
   Serial.print(currentOutputMicrovolts / 1000.0f, 3);
+  Serial.print(F(" mode="));
+  Serial.print(outputModeLabel());
   Serial.print(F(" dir="));
   Serial.print(directionLabel());
+  if (outputModeIsLfo()) {
+    Serial.print(F(" wave="));
+    Serial.print(lfoWaveLabel());
+    Serial.print(F(" rateHz="));
+    Serial.print(currentLfoRateHz(), 3);
+    Serial.print(F(" maxRateHz="));
+    Serial.print(configuredLfoMaxRateHz(), 3);
+    Serial.print(F(" depth="));
+    Serial.print(settings.lfoDepthPercent);
+    Serial.print(F("%"));
+    Serial.print(F(" phase="));
+    Serial.print(lfoPhase, 4);
+  }
   Serial.print(F(" noBendMv="));
   Serial.print(noBendOutputMicrovolts() / 1000L);
   Serial.print(F(" rangeMv="));
@@ -1047,6 +1306,138 @@ void setCurveMode(uint8_t mode, bool persist) {
   Serial.println(curveLabel());
 }
 
+void resetLfoPhase() {
+  lfoPhase = 0.0f;
+  lastLfoUs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.println(F("OK LFO phase reset"));
+}
+
+void setOutputMode(uint8_t mode, bool persist) {
+  settings.outputMode = clampPicoOutputMode(mode);
+  tuneMode = false;
+  lfoPhase = 0.0f;
+  lastLfoUs = 0;
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK mode "));
+  Serial.println(outputModeLabel());
+}
+
+void setLfoWave(uint8_t wave, bool persist) {
+  settings.lfoWave = clampPicoLfoWave(wave);
+  lfoPhase = 0.0f;
+  lastLfoUs = 0;
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK wave "));
+  Serial.println(lfoWaveLabel());
+}
+
+void setCurrentLfoRateStep(int step, bool persist) {
+  if (settings.outputMode == kPicoOutputLfoFm) {
+    settings.lfoFmRate = clampPicoLfoRateStep(step, settings.outputMode);
+  } else {
+    settings.lfoLoRate = clampPicoLfoRateStep(step, settings.outputMode);
+  }
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+
+  char rate[16];
+  formatLfoRate(rate, sizeof(rate), configuredLfoMaxRateHz());
+  Serial.print(F("OK max rate "));
+  Serial.print(rate);
+  Serial.print(F(" step="));
+  Serial.println(currentLfoRateStep());
+}
+
+void setCurrentLfoRateHz(float hz, bool persist) {
+  setCurrentLfoRateStep(nearestPicoLfoRateStep(settings.outputMode, hz), persist);
+}
+
+void setLfoDepthPercent(int value, bool persist) {
+  settings.lfoDepthPercent = clampPicoLfoDepthPercent(value);
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK depth "));
+  Serial.print(settings.lfoDepthPercent);
+  Serial.println(F("%"));
+}
+
+bool parseOutputMode(const char* value, uint8_t* out) {
+  if (value == nullptr || out == nullptr) {
+    return false;
+  }
+  if (strcmp(value, "ped") == 0 || strcmp(value, "pedal") == 0 ||
+      strcmp(value, "expr") == 0) {
+    *out = kPicoOutputPedal;
+    return true;
+  }
+  if (strcmp(value, "lo") == 0 || strcmp(value, "lfo") == 0 ||
+      strcmp(value, "lfolo") == 0) {
+    *out = kPicoOutputLfoLo;
+    return true;
+  }
+  if (strcmp(value, "fm") == 0 || strcmp(value, "fast") == 0 ||
+      strcmp(value, "audio") == 0 || strcmp(value, "lfofm") == 0) {
+    *out = kPicoOutputLfoFm;
+    return true;
+  }
+  return false;
+}
+
+bool parseLfoWave(const char* value, uint8_t* out) {
+  if (value == nullptr || out == nullptr) {
+    return false;
+  }
+  if (strcmp(value, "sine") == 0 || strcmp(value, "sin") == 0) {
+    *out = kPicoLfoSine;
+    return true;
+  }
+  if (strcmp(value, "triangle") == 0 || strcmp(value, "tri") == 0) {
+    *out = kPicoLfoTriangle;
+    return true;
+  }
+  if (strcmp(value, "sawup") == 0 || strcmp(value, "up") == 0 ||
+      strcmp(value, "saw") == 0) {
+    *out = kPicoLfoSawUp;
+    return true;
+  }
+  if (strcmp(value, "sawdown") == 0 || strcmp(value, "sawdn") == 0 ||
+      strcmp(value, "down") == 0 || strcmp(value, "dn") == 0) {
+    *out = kPicoLfoSawDown;
+    return true;
+  }
+  if (strcmp(value, "square") == 0 || strcmp(value, "sqr") == 0 ||
+      strcmp(value, "sq") == 0) {
+    *out = kPicoLfoSquare;
+    return true;
+  }
+  if (strcmp(value, "pulse") == 0 || strcmp(value, "puls") == 0 ||
+      strcmp(value, "pul") == 0) {
+    *out = kPicoLfoPulse;
+    return true;
+  }
+  return false;
+}
+
 bool parseCurveMode(const char* value, uint8_t* out) {
   if (value == nullptr || out == nullptr) {
     return false;
@@ -1069,17 +1460,13 @@ bool parseCurveMode(const char* value, uint8_t* out) {
     *out = kPicoCurveSmooth;
     return true;
   }
-  if (strcmp(value, "next") == 0) {
-    *out = static_cast<uint8_t>((settings.curveMode + 1) % kPicoCurveCount);
-    return true;
-  }
   return false;
 }
 
 void toggleBendDirection() {
   setBendDirection(currentBendDirection() == kPicoBendDown ? kPicoBendUp : kPicoBendDown, true);
   saveSettings();
-  setDisplayMessage(directionLabel(), "DIRECTION", CAL_MESSAGE_MS);
+  setDisplayMessage(directionLabel(), outputModeIsLfo() ? "POLARITY" : "DIRECTION", CAL_MESSAGE_MS);
   renderDisplayNow();
 }
 
@@ -1178,6 +1565,10 @@ void printToeMap() {
 }
 
 void setTuneMode(bool enabled) {
+  if (enabled && outputModeIsLfo()) {
+    Serial.println(F("ERR tune only applies in mode ped"));
+    return;
+  }
   tuneMode = enabled;
   if (tuneMode && cvOverrideEnabled) {
     cvOverrideEnabled = false;
@@ -1322,28 +1713,90 @@ void resetCalibration() {
 void openMenu() {
   pendingShortPress = false;
   menuActive = true;
-  menuIndex = MENU_CURVE;
+  menuIndex = MENU_MODE;
+  menuEditField = MENU_EDIT_NONE;
   displayMessageUntilMs = 0;
   forceDisplayUpdate();
   renderDisplayNow();
-  Serial.println(F("OK menu open; turn encoder to select, short press to choose, hold to exit"));
+  Serial.println(F("OK menu open; turn to item, press to edit/choose, hold to exit"));
 }
 
 void closeMenu() {
   pendingShortPress = false;
   menuActive = false;
+  menuEditField = MENU_EDIT_NONE;
   displayMessageUntilMs = 0;
   forceDisplayUpdate();
   renderDisplayNow();
   Serial.println(F("OK menu closed"));
 }
 
-void moveMenu(int direction) {
-  int next = static_cast<int>(menuIndex) + direction;
-  while (next < 0) {
-    next += MENU_COUNT;
+uint8_t wrapMenuChoice(int value, uint8_t count) {
+  if (count == 0) {
+    return 0;
   }
-  menuIndex = static_cast<uint8_t>(next % MENU_COUNT);
+  while (value < 0) {
+    value += count;
+  }
+  return static_cast<uint8_t>(value % count);
+}
+
+void beginMenuEdit(uint8_t field) {
+  menuEditField = field;
+  menuEditValue = currentMenuEditValue(field);
+  forceDisplayUpdate();
+  renderDisplayNow();
+  Serial.print(F("OK edit "));
+  Serial.print(menuEditTitle(menuEditField));
+  Serial.print(F(" "));
+  Serial.println(menuEditValueLabel(menuEditField, menuEditValue));
+}
+
+void moveMenuEdit(int direction) {
+  menuEditValue =
+      wrapMenuChoice(static_cast<int>(menuEditValue) + direction, menuEditValueCount(menuEditField));
+  forceDisplayUpdate();
+  renderDisplayNow();
+  Serial.print(F("OK edit "));
+  Serial.print(menuEditTitle(menuEditField));
+  Serial.print(F(" "));
+  Serial.println(menuEditValueLabel(menuEditField, menuEditValue));
+}
+
+void commitMenuEdit() {
+  uint8_t field = menuEditField;
+  uint8_t value = menuEditValue;
+  switch (field) {
+    case MENU_EDIT_MODE:
+      setOutputMode(value, true);
+      saveSettings();
+      break;
+    case MENU_EDIT_WAVE:
+      setLfoWave(value, true);
+      saveSettings();
+      break;
+    case MENU_EDIT_DEPTH:
+      setLfoDepthPercent(picoLfoDepthPercentFromIndex(value), true);
+      saveSettings();
+      break;
+    case MENU_EDIT_CURVE:
+      setCurveMode(value, true);
+      saveSettings();
+      break;
+    default:
+      break;
+  }
+  menuEditField = MENU_EDIT_NONE;
+  forceDisplayUpdate();
+  renderDisplayNow();
+}
+
+void moveMenu(int direction) {
+  if (menuEditField != MENU_EDIT_NONE) {
+    moveMenuEdit(direction);
+    return;
+  }
+  menuIndex = wrapMenuChoice(static_cast<int>(menuIndex) + direction, MENU_COUNT);
   forceDisplayUpdate();
   renderDisplayNow();
   Serial.print(F("OK menu "));
@@ -1351,15 +1804,27 @@ void moveMenu(int direction) {
 }
 
 void selectMenuItem() {
+  if (menuEditField != MENU_EDIT_NONE) {
+    commitMenuEdit();
+    return;
+  }
+
   switch (menuIndex) {
+    case MENU_MODE:
+      beginMenuEdit(MENU_EDIT_MODE);
+      break;
+    case MENU_WAVE:
+      beginMenuEdit(MENU_EDIT_WAVE);
+      break;
+    case MENU_DEPTH:
+      beginMenuEdit(MENU_EDIT_DEPTH);
+      break;
     case MENU_CURVE:
-      setCurveMode(static_cast<uint8_t>((settings.curveMode + 1) % kPicoCurveCount), true);
-      saveSettings();
-      forceDisplayUpdate();
-      renderDisplayNow();
+      beginMenuEdit(MENU_EDIT_CURVE);
       break;
     case MENU_CAL:
       menuActive = false;
+      menuEditField = MENU_EDIT_NONE;
       forceDisplayUpdate();
       startCalibration();
       break;
@@ -1370,7 +1835,7 @@ void selectMenuItem() {
       forceDisplayUpdate();
       renderDisplayNow();
       break;
-    case MENU_EXIT:
+    case MENU_DONE:
     default:
       closeMenu();
       break;
@@ -1378,6 +1843,12 @@ void selectMenuItem() {
 }
 
 void performSingleShortPress() {
+  if (outputModeIsLfo()) {
+    resetLfoPhase();
+    setDisplayMessage("SYNC", "LFO PHASE", CAL_MESSAGE_MS);
+    renderDisplayNow();
+    return;
+  }
   setIntervalMagnitude(0, true);
   saveSettings();
   setDisplayMessage("ZERO", "INTERVAL 1", CAL_MESSAGE_MS);
@@ -1503,6 +1974,13 @@ void handleEncoderStep(int direction) {
   if (tuneMode) {
     int voltageDirection = currentBendDirection() == kPicoBendDown ? -direction : direction;
     nudgeToeMapMillivolts(voltageDirection * static_cast<int>(tuneStepMv));
+    return;
+  }
+
+  if (outputModeIsLfo()) {
+    setLfoDepthPercent(static_cast<int>(settings.lfoDepthPercent) +
+                           direction * static_cast<int>(kPicoLfoDepthStepPercent),
+                       true);
     return;
   }
 
@@ -1675,6 +2153,48 @@ void pollSerialCommand(char* line) {
 	    } else {
 	      setOctaveMillivolts(atoi(arg));
 	    }
+  } else if (strcmp(command, "mode") == 0 || strcmp(command, "output") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    uint8_t mode = 0;
+    if (parseOutputMode(arg, &mode)) {
+      setOutputMode(mode, true);
+    } else {
+      Serial.println(F("ERR mode ped|lo|fm"));
+    }
+  } else if (strcmp(command, "wave") == 0 || strcmp(command, "lfo") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    uint8_t wave = 0;
+    if (parseLfoWave(arg, &wave)) {
+      setLfoWave(wave, true);
+    } else {
+      Serial.println(F("ERR wave sine|tri|sawup|sawdown|square|pulse"));
+    }
+  } else if (strcmp(command, "rate") == 0 || strcmp(command, "speed") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    if (arg == nullptr) {
+      Serial.println(F("ERR rate <hz>|step <n>"));
+    } else if (!outputModeIsLfo()) {
+      Serial.println(F("ERR rate only applies in mode lo|fm"));
+    } else if (strcmp(arg, "step") == 0) {
+      char* value = strtok(nullptr, " \t\r\n");
+      if (value == nullptr) {
+        Serial.println(F("ERR rate step <n>"));
+      } else {
+        setCurrentLfoRateStep(atoi(value), true);
+      }
+    } else {
+      setCurrentLfoRateHz(atof(arg), true);
+    }
+  } else if (strcmp(command, "sync") == 0 || strcmp(command, "phase") == 0) {
+    resetLfoPhase();
+  } else if (strcmp(command, "depth") == 0 || strcmp(command, "atten") == 0 ||
+             strcmp(command, "level") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    if (arg == nullptr) {
+      Serial.println(F("ERR depth 50..100"));
+    } else {
+      setLfoDepthPercent(atoi(arg), true);
+    }
   } else if (strcmp(command, "response") == 0 || strcmp(command, "resp") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
     if (arg != nullptr && strcmp(arg, "off") == 0) {
@@ -1690,7 +2210,7 @@ void pollSerialCommand(char* line) {
     if (parseCurveMode(arg, &mode)) {
       setCurveMode(mode, true);
     } else {
-      Serial.println(F("ERR curve linear|easeout|square|smooth|next"));
+      Serial.println(F("ERR curve linear|easeout|square|smooth"));
     }
   } else if (strcmp(command, "map") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
@@ -1864,7 +2384,7 @@ void pollSerial() {
 }
 
 void printHelp() {
-  Serial.println(F("Precision Expression Controller Pico commands:"));
+  Serial.println(F("Therevox Expression Controller commands:"));
   Serial.println(F("  status             show current state"));
   Serial.println(F("  monitor on|off      periodic serial monitor"));
   Serial.println(F("  interval -9..9      signed interval; max label is 6"));
@@ -1873,8 +2393,14 @@ void printHelp() {
   Serial.println(F("  more|less           change interval size by one semitone"));
   Serial.println(F("  center              set interval to unison"));
   Serial.println(F("  range <mv>          old linear voltage scale, 0..3300; disables response fit"));
+  Serial.println(F("  mode ped|lo|fm      PED interval, LO slow LFO, FM fast LFO"));
+  Serial.println(F("  wave sine|tri|sawup|sawdown|square|pulse"));
+  Serial.println(F("  rate <hz>           set LFO toe/max speed; pedal sweeps min..max"));
+  Serial.println(F("  rate step <n>       set raw LFO toe/max speed step"));
+  Serial.println(F("  depth 50..100       set LFO depth/attenuation in 5% steps"));
+  Serial.println(F("  sync                reset LFO phase"));
   Serial.println(F("  response <cents>|off full-scale cents; 3960 = standard 1V/oct, bench default 924"));
-  Serial.println(F("  curve linear|easeout|square|smooth|next"));
+  Serial.println(F("  curve linear|easeout|square|smooth"));
   Serial.println(F("  map show|reset      show or rebuild directional toe-voltage map"));
   Serial.println(F("  map <semi> <mv>     set toe voltage for one interval"));
   Serial.println(F("  toe <mv>            set toe voltage for current interval"));
@@ -1893,8 +2419,8 @@ void printHelp() {
   Serial.println(F("  menu                open OLED menu"));
   Serial.println(F("  sleep|wake          manual sleep test; auto idle sleep disabled in bench build"));
   Serial.println(F("  save                persist settings"));
-  Serial.println(F("Encoder: turn = interval, short press = unison/capture, double-click = UP/DOWN, hold 2s = menu."));
-  Serial.println(F("Menu: turn = select, short press = choose, hold 2s = exit; CAL starts pedal calibration."));
+  Serial.println(F("Encoder: PED turn=interval; LO/FM turn=depth; pedal controls LO/FM rate; short=unison/sync/capture; double=UP/DN."));
+  Serial.println(F("Menu: turn=select item, press=choose. MODE/WAVE/DEPTH/CURVE open pickers; turn=value, press=save."));
   Serial.println(F("Tune mode: turn = toe mV trim, short press = save/exit."));
 }
 
@@ -1965,7 +2491,7 @@ void setup() {
   }
 
   Serial.println();
-  Serial.println(F("Precision Expression Controller Pico"));
+  Serial.println(F("Therevox Expression Controller"));
   Serial.println(F("Board: Raspberry Pi Pico H"));
   Serial.println(dacReady ? F("MCP4725 PASS at 0x62") : F("MCP4725 FAIL at 0x62"));
   Serial.println(displayReady ? F("SSD1306 PASS at 0x3C") : F("SSD1306 FAIL at 0x3C"));

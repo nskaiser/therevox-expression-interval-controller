@@ -191,6 +191,13 @@ Voltage tuning commands:
 direction up     heel/no-bend 0.000V, toe bends upward
 direction down   heel/no-bend 3.300V, toe bends downward
 range 3300       old linear voltage map; disables response fit
+mode ped         expression pedal interval mode
+mode lo          slow LFO mode, 0.05-20Hz
+mode fm          fast LFO/FM mode, 8-160Hz
+wave sine        LFO waveform: sine, tri, sawup, sawdown, square, pulse
+rate 1.5         set LO/FM toe/max speed; pedal sweeps from mode minimum to this
+depth 75         set LFO depth/attenuation, 50-100% in 5% steps
+sync             reset LFO phase
 response 924     compressed bench response; rebuilds the global map
 save             persist the settings
 ```
@@ -399,19 +406,22 @@ If the OLED shows unreadable or flickering text and Serial finds `0x3C` (`displa
 
 | Action | Result |
 | --- | --- |
-| Turn encoder clockwise | Increase interval size by one semitone, up to major 6th |
-| Turn encoder counterclockwise | Decrease interval size by one semitone |
-| Short press encoder | Reset interval to unison |
-| Double-click encoder | Toggle `UP` / `DOWN` direction |
+| Turn encoder in `PED` | Change interval size by one semitone, up to major 6th |
+| Move pedal in `LO`/`FM` | Sweep LFO speed within that mode's range |
+| Turn encoder in `LO`/`FM` | Change LFO depth/attenuation in `5%` steps |
+| Short press encoder in `PED` | Reset interval to unison |
+| Short press encoder in `LO`/`FM` | Reset/sync LFO phase |
+| Double-click encoder | Toggle `UP` / `DOWN`; in LFO modes this flips polarity |
 | Hold encoder about `2s` | Open menu |
-| In menu, turn encoder | Select `CURVE`, `CAL`, `DIR`, or `DONE` |
-| In menu, short press encoder | Change/select the shown item |
+| In menu, turn encoder | Select `MODE`, `WAVE`, `DEPTH`, `CURVE`, `CAL`, `DIR/POL`, or `DONE` |
+| In menu, short press encoder | Open the shown setting, run `CAL`, toggle `DIR/POL`, or exit on `DONE` |
+| Editing `MODE`, `WAVE`, `DEPTH`, or `CURVE` | Turn to the value you want, then short press to save |
 | In menu, hold encoder about `2s` | Exit menu |
 | Serial `sleep` / `wake` | Manual sleep test only; automatic idle sleep is disabled for bench testing |
 
 Settings autosave about `3s` after the last change.
 
-Curve choices:
+PED-mode curve choices:
 
 ```text
 curve linear     current/default feel
@@ -419,6 +429,28 @@ curve easeout    smoother near toe; try this first if the bend jumps late
 curve square     slower early, faster near toe
 curve smooth     softer heel/toe, faster middle
 ```
+
+LFO modes:
+
+```text
+mode lo          slow LFO, 0.05-20Hz; pedal sweeps speed in this range
+mode fm          faster modulation, 8-160Hz; pedal sweeps speed in this range
+mode ped         return to expression-pedal interval mode
+wave sine        smooth sine LFO
+wave tri         triangle LFO
+wave sawup       rising sawtooth
+wave sawdown     falling sawtooth
+wave square      50% square wave
+wave pulse       narrow 25% pulse wave
+rate 2.5         set current LFO mode's toe/max speed to 2.5Hz
+depth 75         set LFO depth/attenuation; 75% keeps the wave centered but reduces its swing
+sync             reset LFO phase to the start of the cycle
+```
+
+The LFO output is unipolar `0-3.3V`. `UP` polarity is normal; `DOWN`
+polarity inverts the LFO. Depth is bipolar around the midpoint: at `75%`, a sine
+peak is `75%` as far above and below the midpoint as it is at `100%`. The top of `FM` mode is intentionally rough because
+the MCP4725 is an I2C DAC, not a true audio DAC.
 
 ## Pedal Calibration
 

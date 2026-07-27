@@ -100,6 +100,41 @@ int main() {
   PedalState square = processor.process(250, 1000.0f);
   assert(square.curved < linear.curved);
 
+  assert(picoOutputModeDisplayLabel(kPicoOutputPedal)[0] == 'P');
+  assert(picoOutputModeDisplayLabel(kPicoOutputLfoLo)[0] == 'L');
+  assert(picoLfoWaveDisplayLabel(kPicoLfoTriangle)[0] == 'T');
+  assert(clampPicoOutputMode(99) == kPicoOutputLfoFm);
+  assert(clampPicoLfoWave(99) == kPicoLfoPulse);
+  assert(clampPicoLfoRateStep(999, kPicoOutputLfoLo) == kPicoLfoLoRateSteps);
+  assert(clampPicoLfoRateStep(999, kPicoOutputLfoFm) == kPicoLfoFmRateSteps);
+  assert(computePicoLfoRateHz(kPicoOutputLfoLo, kPicoDefaultLfoLoRate) > 0.95f);
+  assert(computePicoLfoRateHz(kPicoOutputLfoLo, kPicoDefaultLfoLoRate) < 1.05f);
+  assert(computePicoLfoRateHz(kPicoOutputLfoFm, kPicoDefaultLfoFmRate) > 31.0f);
+  assert(computePicoLfoRateHz(kPicoOutputLfoFm, kPicoDefaultLfoFmRate) < 33.0f);
+  assert(computePicoLfoRateHzForPedal(kPicoOutputLfoLo, 0.0f, kPicoLfoLoRateSteps) > 0.049f);
+  assert(computePicoLfoRateHzForPedal(kPicoOutputLfoLo, 0.0f, kPicoLfoLoRateSteps) < 0.051f);
+  assert(computePicoLfoRateHzForPedal(kPicoOutputLfoLo, 0.5f, kPicoLfoLoRateSteps) > 0.99f);
+  assert(computePicoLfoRateHzForPedal(kPicoOutputLfoLo, 0.5f, kPicoLfoLoRateSteps) < 1.01f);
+  assert(computePicoLfoRateHzForPedal(kPicoOutputLfoLo, 1.0f, kPicoLfoLoRateSteps) > 19.9f);
+  assert(computePicoLfoRateHzForPedal(kPicoOutputLfoLo, 1.0f, kPicoLfoLoRateSteps) < 20.1f);
+  assert(nearestPicoLfoRateStep(kPicoOutputLfoLo, 1.0f) == kPicoDefaultLfoLoRate);
+  assert(clampPicoLfoDepthPercent(49) == 50);
+  assert(clampPicoLfoDepthPercent(73) == 75);
+  assert(clampPicoLfoDepthPercent(101) == 100);
+  assert(picoLfoDepthPercentFromIndex(0) == 50);
+  assert(picoLfoDepthPercentFromIndex(10) == 100);
+  assert(attenuatePicoLfoWaveValue(1.0f, 75) > 0.874f);
+  assert(attenuatePicoLfoWaveValue(1.0f, 75) < 0.876f);
+  assert(attenuatePicoLfoWaveValue(0.0f, 75) > 0.124f);
+  assert(attenuatePicoLfoWaveValue(0.0f, 75) < 0.126f);
+  assert(computePicoLfoWaveValue(0.25f, kPicoLfoSine) > 0.99f);
+  assert(computePicoLfoWaveValue(0.25f, kPicoLfoTriangle) > 0.49f);
+  assert(computePicoLfoWaveValue(0.25f, kPicoLfoSawUp) > 0.24f);
+  assert(computePicoLfoWaveValue(0.25f, kPicoLfoSawDown) > 0.74f);
+  assert(computePicoLfoWaveValue(0.60f, kPicoLfoSquare) < 0.01f);
+  assert(computePicoLfoWaveValue(0.20f, kPicoLfoPulse) > 0.99f);
+  assert(computePicoLfoWaveValue(0.30f, kPicoLfoPulse) < 0.01f);
+
   printf("pico core tests passed\n");
   return 0;
 }

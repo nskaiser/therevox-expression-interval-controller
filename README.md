@@ -1,6 +1,6 @@
-# Therevox Expression Interval Controller
+# Therevox Expression Controller
 
-Turns an expression pedal into a precise pitch-bend interval controller for the Therevox. Pick an interval with the rotary encoder (semitone up to an octave, in either direction), and the pedal bends smoothly from no-bend to exactly that interval.
+Turns an expression pedal input into a programmable Therevox modulation source. In `PED` mode, pick a pitch-bend interval with the rotary encoder and the pedal bends smoothly from no-bend to that interval; in `LO`/`FM` modes, the same output jack becomes a selectable-waveform LFO source.
 
 Built with:
 
@@ -37,6 +37,8 @@ Interval accuracy comes from a per-interval voltage map. Set the overall scale w
 
 Note the DAC output tops out at 3.3 V. If your instrument needs more than that for an octave, the largest selectable interval shrinks accordingly.
 
+LFO modes ignore the pedal interval map and output a unipolar `0-3.3V` modulation signal from the DAC. `LO` covers slow LFO rates (`0.05-20 Hz`); `FM` covers faster modulation rates (`8-160 Hz`). The pedal sweeps LFO speed from slow to fast, and the encoder adjusts LFO depth/attenuation from `50-100%` in `5%` steps.
+
 ## Build And Upload
 
 1. In Arduino IDE, install the board package `Raspberry Pi Pico/RP2040/RP2350` by Earle F. Philhower.
@@ -64,15 +66,29 @@ arduino-cli compile --fqbn rp2040:rp2040:rpipico pico/PrecisionExpressionControl
 
 | Action | Result |
 | --- | --- |
-| Turn encoder | Change interval size by one semitone |
-| Short press | Reset interval to unison |
-| Double-click | Toggle `UP` / `DOWN` direction |
-| Hold ~2s | Open menu (`CURVE`, `CAL`, `DIR`, `DONE`) |
-| In menu: turn / press / hold ~2s | Select / choose / exit |
+| Turn encoder in `PED` | Change interval size by one semitone |
+| Move pedal in `LO`/`FM` | Sweep LFO speed within that mode's range |
+| Turn encoder in `LO`/`FM` | Change LFO depth/attenuation in `5%` steps |
+| Short press in `PED` | Reset interval to unison |
+| Short press in `LO`/`FM` | Reset/sync LFO phase |
+| Double-click | Toggle `UP` / `DOWN`; in LFO modes this flips polarity |
+| Hold ~2s | Open menu (`MODE`, `WAVE`, `DEPTH`, `CURVE`, `CAL`, `DIR/POL`, `DONE`) |
+| In menu: turn / press / hold ~2s | Scroll items / edit or choose / exit |
+| Editing `MODE`, `WAVE`, `DEPTH`, or `CURVE` | Turn to the value you want, then press to save |
 
 Settings autosave about 3s after the last change.
 
-Pedal feel: `curve linear|easeout|square|smooth` over serial.
+PED-mode pedal feel: `curve linear|easeout|square|smooth` over serial.
+
+LFO serial shortcuts:
+
+```text
+mode ped|lo|fm
+wave sine|tri|sawup|sawdown|square|pulse
+rate 1.5      set toe/max speed; pedal sweeps from mode minimum to this
+depth 75
+sync
+```
 
 ## Project Layout
 

@@ -20,13 +20,16 @@ Features implemented:
 - Pico H ADC read from expression pedal on `GP26/ADC0`.
 - Heel/toe calibration from the encoder menu.
 - One-direction CV model capped at a major 6th for this bench build. `UP` uses `0.000 V` heel/no-bend to about `3.214 V` toe with the current response fit; `DOWN` uses `3.300 V` heel/no-bend to about `0.086 V` toe.
+- Output modes: `PED` expression interval mode, `LO` slow LFO mode, and `FM` faster modulation mode.
+- LFO waveforms: sine, triangle, saw up, saw down, square, pulse.
+- LFO `LO` range: `0.05-20 Hz`; LFO `FM` range: `8-160 Hz`.
 - MCP4725 DAC CV output over I2C on `GP4/SDA` and `GP5/SCL`.
 - 128x32 SSD1306 OLED on the same I2C bus.
 - Rotary encoder on `GP14`/`GP15`; push switch on `GP13`.
 - Short encoder press resets interval to unison.
 - Double-click encoder toggles `UP` / `DOWN` direction.
 - Encoder hold about `2s` opens an OLED menu.
-- OLED menu can change curve, start calibration, toggle direction, or close.
+- OLED menu can change mode, waveform, curve, start calibration, toggle direction/polarity, or close.
 - Pedal curve modes: linear, easeout, square, smooth.
 - Automatic idle sleep is disabled during bench testing to avoid OLED blank/wake flicker.
 - Autosave about `3s` after interval/calibration changes.
@@ -43,10 +46,13 @@ Acceptance criteria:
 - `interval -9` measures about `3.300 V` at heel and `0.086 V` at toe.
 - Rotary encoder steps exactly one semitone of interval size per detent.
 - Short press resets to unison; double-click toggles direction; long press opens the OLED menu.
+- In `LO`/`FM`, the expression pedal sweeps LFO speed and the rotary encoder changes LFO depth.
+- `LO`/`FM` output remains `0-3.3V`, supports all six LFO waveforms, and supports `50-100%` depth/attenuation.
 
 ## Later Product Questions
 
 - Whether MCP4725 resolution is enough musically, or whether a higher-precision DAC is needed.
+- Whether a future audio-rate LFO needs a faster DAC or PWM/filter output instead of MCP4725 I2C.
 - Bench result: the active output reaches about a sixth even when firmware requests more and the output measures about `3.2V`. This build accepts that limit for now and remaps intervals so `6` is accurate.
 - Decide whether the prototype should use true active 1V/oct CV on physical Tip/Sleeve or a passive expression-pedal emulator that matches the Nektar NX-P behavior.
 - Whether to keep the OLED or switch to a simpler segment display after debug needs are gone.
