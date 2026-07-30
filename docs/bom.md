@@ -5,25 +5,31 @@ This is the active Pico H prototype BOM.
 | Item | Qty | Notes |
 | --- | ---: | --- |
 | Raspberry Pi Pico H | 1 | Adafruit PID 5525, headers already soldered |
-| Adafruit MCP4725 I2C DAC breakout | 1 | PID 935, default address `0x62`; STEMMA handles I2C/power |
+| MCP4728 quad I2C DAC breakout | 1 | DIYmall GY-MCP4728 or equivalent, default address `0x60` |
 | Adafruit 0.91 inch 128x32 I2C SSD1306 OLED | 1 | PID 4440, default address `0x3C` |
-| STEMMA QT / Qwiic JST-SH to male headers cable | 2 | PID 4209, one for DAC and one for OLED |
+| STEMMA QT / Qwiic JST-SH to male headers cable | 1 | For OLED |
 | Rotary Encoder + Extras | 1 | Adafruit PID 377 |
-| TRS jack/breakout | 2 | One expression pedal input, one Therevox CV output |
-| `1k` resistor | 2 | Input Tip series resistor and DAC output series resistor |
+| 1/4 inch TRS jack/breakout | 2 | One expression pedal input, one Therevox expression/CV output |
+| 3.5mm TS or TRS jack | 2 | Dedicated `LFO1` and `LFO2` patch outputs; leave Ring unconnected on TRS jacks |
+| 3.5mm TS or TRS jack | 1 (optional) | Clock output from MCP4728 `VOUTD` |
+| `1k` resistor | 4 | Input Tip series resistor plus one series resistor per DAC output |
 | `100nF` ceramic capacitor | 1 | Pico `GP26/ADC0` input filter to `GND` |
 | Solderable perfboard | 1 | Use for the enclosure build |
-| Hookup wire | as needed | `22-24 AWG`; use one separate wire for MCP4725 `VOUT` |
+| Hookup wire | as needed | `22-24 AWG`; use separate wires for MCP4728 `VOUTA`, `VOUTB`, and `VOUTC` |
 | USB micro cable | 1 | For programming and power |
 | USB power bank | 1 | Recommended portable power source |
 | M2.5 screws/standoffs or printed posts | as needed | For mounting perfboard/enclosure |
 
-The STEMMA cable does not carry the DAC output. Wire this separately for the active-CV test:
+The I2C wiring does not carry the DAC outputs. Wire these separately:
 
 ```text
-MCP4725 VOUT -> 1k -> output plug physical Tip
-Output TRS Sleeve -> Pico GND
-Output plug physical Ring -> leave unconnected
+MCP4728 LDAC  -> Pico GND (required; outputs can freeze if LDAC floats)
+MCP4728 VOUTA -> 1k -> Therevox expression output plug physical Tip
+MCP4728 VOUTB -> 1k -> LFO1 3.5mm jack Tip
+MCP4728 VOUTC -> 1k -> LFO2 3.5mm jack Tip
+MCP4728 VOUTD -> 1k -> optional clock 3.5mm jack Tip (clock lfo1|lfo2 command)
+All output jack sleeves -> Pico GND
+Therevox expression output plug physical Ring -> leave unconnected
 ```
 
 Optional finishing supplies:

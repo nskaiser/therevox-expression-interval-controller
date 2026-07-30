@@ -1,10 +1,10 @@
 # Pico H Prototype
 
-This is the cheaper soldered prototype build: Raspberry Pi Pico H, MCP4725 DAC, 128x32 OLED, one rotary encoder with push, and two TRS jacks.
+This is the cheaper soldered prototype build: Raspberry Pi Pico H, MCP4728 quad DAC, 128x32 OLED, one rotary encoder with push, two 1/4 inch TRS jacks, and two 3.5mm dedicated LFO output jacks.
 
 ## Important Voltage Model
 
-This firmware uses one bend direction at a time. That gives the active direction the full MCP4725 output range.
+This firmware uses one bend direction at a time for the expression output. That gives the active direction the full MCP4728 channel-A output range.
 
 ```text
 UP mode:
@@ -16,7 +16,7 @@ DOWN mode:
   toe major 6th: 0.086 V with the current response fit
 ```
 
-Tune the Therevox with the expression pedal heel-down in the active direction. Double-click the encoder to toggle `UP`/`DOWN`.
+Tune the Therevox with the expression pedal heel-down in the active direction. Use the OLED menu `DIR/POL` item or serial `direction up|down` to change `UP`/`DOWN`.
 
 Important hardware limitation: the current output is an active `0-3.3V` DAC signal. For a standard Therevox external-CV test, that voltage should be on the physical plug `Tip` relative to physical plug `Sleeve`. If your jack breakout only bends when you swap its `Tip` and `Ring` lugs, verify with a meter at the actual plug contacts; do not rely only on the breakout silkscreen.
 
@@ -25,12 +25,13 @@ Important hardware limitation: the current output is an active `0-3.3V` DAC sign
 | Item | Qty | Notes |
 | --- | ---: | --- |
 | Raspberry Pi Pico H | 1 | Adafruit PID 5525 |
-| Adafruit MCP4725 DAC breakout | 1 | PID 935, I2C address `0x62` |
+| MCP4728 quad DAC breakout | 1 | DIYmall GY-MCP4728 or equivalent, I2C address `0x60` |
 | Adafruit 0.91 inch 128x32 I2C OLED | 1 | PID 4440, I2C address `0x3C` |
-| STEMMA QT / Qwiic JST-SH to male headers cable | 2 | PID 4209, one for DAC and one for OLED |
+| STEMMA QT / Qwiic JST-SH to male headers cable | 1 | PID 4209, for OLED |
 | Rotary Encoder + Extras | 1 | Adafruit PID 377 |
-| TRS jack | 2 | Already owned |
-| `1k` resistor | 2 | One pedal input series resistor, one DAC output series resistor |
+| 1/4 inch TRS jack | 2 | Expression pedal input and Therevox expression/CV output |
+| 3.5mm TS or TRS jack | 2 | Dedicated `LFO1` and `LFO2` patch-panel outputs |
+| `1k` resistor | 4 | One pedal input series resistor, plus one series resistor per DAC output |
 | `100nF` capacitor | 1 | Pedal input noise filter |
 | Perfboard | 1 | Better than breadboard for Therevox testing |
 | Hookup wire | as needed | `22-24 AWG` solid or stranded |
@@ -62,29 +63,48 @@ Input TRS Ring ----------- Pico 3V3(OUT)
 
 ### I2C Bus Shared by DAC and OLED
 
-Both STEMMA cables connect to the same Pico pins.
+The OLED STEMMA cable and the MCP4728 header pins connect to the same Pico I2C pins.
 
-| STEMMA wire | Pico H pin |
+| Signal / OLED STEMMA wire | Pico H pin |
 | --- | --- |
 | Red / VCC | `3V3(OUT)`, physical pin `36` |
 | Black / GND | `GND`, physical pin `38` |
 | Blue / SDA | `GP4`, physical pin `6` |
 | Yellow / SCL | `GP5`, physical pin `7` |
 
-This is normal I2C sharing. The DAC is `0x62`; the OLED is `0x3C`.
+On the MCP4728 board, use the pins labeled `VCC`, `GND`, `SDA`, and `SCL`.
 
-### MCP4725 DAC Output to Therevox TRS Jack
+**Also wire the MCP4728 `LDAC` pin to `GND`.** If `LDAC` floats high, the chip
+accepts every I2C write but can hold the analog outputs frozen — the firmware
+uses latch-safe multi-write commands as a backstop, but grounding `LDAC` removes
+the failure mode entirely.
 
-The STEMMA cable does not carry the DAC output. Add one regular hookup wire:
+This is normal I2C sharing. The MCP4728 DAC is `0x60`; the OLED is `0x3C`.
+
+### MCP4728 DAC Outputs
+
+The I2C cable/header wiring does not carry the DAC outputs. Add regular hookup wires from the DAC `VOUT` pins to the output jacks:
 
 ```text
-MCP4725 VOUT ---- 1k ---- Output plug physical Tip
-Output TRS Sleeve ------- GND
+MCP4728 VOUTA ---- 1k ---- Therevox expression output plug physical Tip
+Output TRS Sleeve -------- GND
 Output plug physical Ring - not connected
 
+MCP4728 VOUTB ---- 1k ---- LFO1 3.5mm jack Tip
+LFO1 Sleeve --------------- GND
+
+MCP4728 VOUTC ---- 1k ---- LFO2 3.5mm jack Tip
+LFO2 Sleeve --------------- GND
+
+MCP4728 VOUTD ---- 1k ---- optional clock 3.5mm jack Tip (see `clock` command)
+Clock jack Sleeve --------- GND
+Leave VOUTD unconnected if you do not need the clock output.
+
 Do not use the old optional `100k` pulldown or any temporary `10k` to `11k`
-load resistor on the output jack for this active-CV test.
+load resistor on any output jack for this active-CV test.
 ```
+
+If the 3.5mm jacks are TRS instead of TS, use `Tip` and `Sleeve` only. Leave `Ring` unconnected.
 
 Your Nektar NX-P resistance measurements showed:
 
@@ -158,6 +178,11 @@ The local smoke compile passed with:
 arduino-cli compile --fqbn rp2040:rp2040:rpipico pico/PrecisionExpressionControllerPico
 ```
 
+Flashing over the previous release keeps your pedal calibration and tuned toe
+map: the firmware migrates stored settings from the last layout (version 11)
+and only falls back to defaults from anything older. New settings (pulse width,
+offset, link, clock) start at their defaults after migration.
+
 ## Bench Smoke Test
 
 Do this before connecting the Therevox.
@@ -169,21 +194,23 @@ g++ -std=c++17 sim/pico_console_sim.cpp -o /tmp/expctrl_pico_console_sim
 /tmp/expctrl_pico_console_sim
 ```
 
-It prints simulated Serial Monitor output, OLED text, DAC millivolts, and DAC codes. It exits with `SIM RESULT: PASS` only after verifying one-direction UP/DOWN rails, encoder steps, calibration, autosave, and bench idle-sleep disabled.
+It prints simulated Serial Monitor output, OLED text, DAC millivolts, and DAC codes. It exits with `SIM RESULT: PASS` only after verifying one-direction UP/DOWN rails, MCP4728-style `EXP`/`LFO1`/`LFO2` DAC state, encoder steps, calibration, autosave, and bench idle-sleep disabled.
 
 1. Power the Pico from USB.
 2. Open Serial Monitor at `115200`.
 3. Confirm boot says:
 
 ```text
-MCP4725 PASS at 0x62
+MCP4728 PASS at 0x60
 SSD1306 PASS at 0x3C
 ```
 
-4. Put a multimeter black probe on the output plug physical Sleeve and red probe on the output plug physical Tip.
+4. Put a multimeter black probe on the Therevox output plug physical Sleeve and red probe on the output plug physical Tip.
 5. Send `interval 9`; heel should be about `0.000V`, toe about `3.214V`.
 6. Send `interval -9`; heel should be about `3.300V`, toe about `0.086V`.
 7. Send `center`; output should stay at the active direction's heel/no-bend rail.
+8. Move the red probe to the `LFO1` 3.5mm Tip, with black on Sleeve. You should see voltage moving between about `0V` and `3.3V`.
+9. Move the red probe to the `LFO2` 3.5mm Tip. You should also see an independent moving voltage.
 
 Voltage tuning commands:
 
@@ -194,13 +221,25 @@ range 3300       old linear voltage map; disables response fit
 mode ped         expression pedal interval mode
 mode lo          slow LFO mode, 0.05-20Hz
 mode fm          fast LFO/FM mode, 8-160Hz
-wave sine        LFO waveform: sine, tri, sawup, sawdown, square, pulse
-rate 1.5         set LO/FM toe/max speed; pedal sweeps from mode minimum to this
-depth 75         set LFO depth/attenuation, 50-100% in 5% steps
-sync             reset LFO phase
+focus exp        encoder/menu edits the expression output
+focus lfo1       encoder/menu edits dedicated LFO1
+focus lfo2       encoder/menu edits dedicated LFO2
+wave sine        LFO waveform: sine, tri, sawup, sawdown, square, pulse, sh, drift
+rate 1.5         set focused LFO speed; EXP LFO uses this as toe/max speed
+depth 75         set focused LFO depth/attenuation, 0-100% in 5% steps
+pw 60            pulse-wave width, 5-95%
+offset -25       shift focused LFO1/LFO2 center voltage, -50..50%
+link 1:2         lock LFO2 rate to LFO1; also link phase 0|90|180|270
+clock lfo1       full-swing clock square on VOUTD; clock off disables
+sync             reset focused LFO phase; sync all resets every LFO
+tap              send twice at tempo to set the focused LFO rate
 response 924     compressed bench response; rebuilds the global map
+dac eeprom       program 0V power-on defaults into the MCP4728 (run once)
 save             persist the settings
 ```
+
+Run `dac eeprom` once per MCP4728 board. It stores 0V power-on values in the
+DAC's own EEPROM so the jacks stay silent between power-on and firmware boot.
 
 The default is `direction up` and `response 924`, based on your measured compressed active-DAC response. Selectable intervals now stop at `interval 9`, labeled `6` for a major 6th. `response 3960` means standard `1V/oct` behavior because full DAC scale is about `3.3V`, or `3960` cents. `response off` returns to the older linear voltage map.
 
@@ -404,18 +443,21 @@ If the OLED shows unreadable or flickering text and Serial finds `0x3C` (`displa
 
 ## Controls
 
+For the full OLED menu manual, see `user-manual.md`.
+
 | Action | Result |
 | --- | --- |
-| Turn encoder in `PED` | Change interval size by one semitone, up to major 6th |
-| Move pedal in `LO`/`FM` | Sweep LFO speed within that mode's range |
-| Turn encoder in `LO`/`FM` | Change LFO depth/attenuation in `5%` steps |
+| Double-click encoder | Cycle edit focus: `EXP` -> `LFO1` -> `LFO2` |
+| Turn encoder with `EXP` focused in `PED` | Change interval size by one semitone, up to major 6th |
+| Move pedal with `EXP` focused in `LO`/`FM` | Sweep expression-output LFO speed within that mode's range |
+| Turn encoder with `EXP` focused in `LO`/`FM` | Change expression-output LFO depth/attenuation in `5%` steps |
+| Turn encoder with `LFO1` or `LFO2` focused | Change that dedicated LFO's speed (or phase offset when `LFO2` is linked) |
 | Short press encoder in `PED` | Reset interval to unison |
-| Short press encoder in `LO`/`FM` | Reset/sync LFO phase |
-| Double-click encoder | Toggle `UP` / `DOWN`; in LFO modes this flips polarity |
+| Short press encoder in `LO`/`FM`, `LFO1`, or `LFO2` | Sync the focused LFO; two presses at tempo tap its rate |
 | Hold encoder about `2s` | Open menu |
-| In menu, turn encoder | Select `MODE`, `WAVE`, `DEPTH`, `CURVE`, `CAL`, `DIR/POL`, or `DONE` |
+| In menu, turn encoder | Scroll the visible menu items |
 | In menu, short press encoder | Open the shown setting, run `CAL`, toggle `DIR/POL`, or exit on `DONE` |
-| Editing `MODE`, `WAVE`, `DEPTH`, or `CURVE` | Turn to the value you want, then short press to save |
+| Editing a menu value | Turn to the value you want, then short press to save |
 | In menu, hold encoder about `2s` | Exit menu |
 | Serial `sleep` / `wake` | Manual sleep test only; automatic idle sleep is disabled for bench testing |
 
@@ -433,24 +475,43 @@ curve smooth     softer heel/toe, faster middle
 LFO modes:
 
 ```text
-mode lo          slow LFO, 0.05-20Hz; pedal sweeps speed in this range
-mode fm          faster modulation, 8-160Hz; pedal sweeps speed in this range
+focus exp        edit the expression output
+focus lfo1       edit dedicated LFO1 output
+focus lfo2       edit dedicated LFO2 output
+mode lo          slow LFO, 0.05-20Hz
+mode fm          faster modulation, 8-160Hz
 mode ped         return to expression-pedal interval mode
 wave sine        smooth sine LFO
 wave tri         triangle LFO
 wave sawup       rising sawtooth
 wave sawdown     falling sawtooth
 wave square      50% square wave
-wave pulse       narrow 25% pulse wave
-rate 2.5         set current LFO mode's toe/max speed to 2.5Hz
-depth 75         set LFO depth/attenuation; 75% keeps the wave centered but reduces its swing
-sync             reset LFO phase to the start of the cycle
+wave pulse       pulse wave; width set with pw 5..95, default 25%
+wave sh          sample+hold: a new random level each cycle
+wave drift       smooth glide between random levels
+rate 2.5         set focused LFO speed; EXP LFO uses this as toe/max speed
+depth 75         set focused LFO depth/attenuation; 0 pins the output at center
+pw 60            pulse-wave width for the focused LFO
+offset -25       shift focused LFO1/LFO2 center voltage
+link 1:2         lock LFO2 rate to half of LFO1's; link off to free-run
+link phase 90    linked LFO2 quarter-cycle offset (0|90|180|270)
+clock lfo1       clock square on VOUTD at LFO1's rate; clock off disables
+sync             reset focused LFO phase; sync all resets every LFO
+tap              send twice at tempo to set the focused LFO rate
+polarity down    invert focused LFO1/LFO2
 ```
 
-The LFO output is unipolar `0-3.3V`. `UP` polarity is normal; `DOWN`
+All DAC outputs are unipolar `0-3.3V`. `UP` polarity is normal; `DOWN`
 polarity inverts the LFO. Depth is bipolar around the midpoint: at `75%`, a sine
-peak is `75%` as far above and below the midpoint as it is at `100%`. The top of `FM` mode is intentionally rough because
-the MCP4725 is an I2C DAC, not a true audio DAC.
+peak is `75%` as far above and below the midpoint as it is at `100%`, and at
+`0%` the output sits flat at the midpoint (add `offset` for a fixed CV). The
+top of `FM` mode is intentionally rough because the MCP4728 is an I2C DAC, not
+a true audio DAC.
+
+Linked LFO2 (`link` other than `off`) derives its phase from LFO1, so ratio
+pairs like `1:2` or quadrature (`1:1` + `link phase 90`) stay locked forever;
+while linked, LFO2's own `rate` is ignored and the encoder steps the phase
+offset instead.
 
 ## Pedal Calibration
 

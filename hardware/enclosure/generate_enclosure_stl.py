@@ -42,7 +42,7 @@ class CircleHole:
 
 # Main enclosure dimensions. This fits comfortably on a Prusa Mini bed.
 OUTER_WIDTH = 126.0
-OUTER_DEPTH = 82.0
+OUTER_DEPTH = 112.0
 BODY_HEIGHT = 34.0
 WALL = 2.4
 BOTTOM = 2.4
@@ -59,6 +59,9 @@ ENCODER_CENTER_Y = -18.0
 # Side cutouts. Most 1/4" panel jacks want about 9.5-10 mm.
 TRS_HOLE_D = 10.5
 TRS_CENTER_Z = 18.0
+LFO_HOLE_D = 6.5
+LFO_CENTER_X_OFFSET = 16.0
+LFO_CENTER_Z = 16.0
 USB_WINDOW_W = 18.0
 USB_WINDOW_H = 10.0
 USB_CENTER_Z = 16.0
@@ -69,6 +72,16 @@ POST_OUTER_D = 8.0
 POST_INNER_D = 2.7
 POST_MARGIN_X = 10.0
 POST_MARGIN_Y = 8.0
+
+# Perfboard mounting geometry. This targets the 70 mm x 90 mm A-Z / 1-31
+# perfboard used in the docs. Measure the real board before printing and tune
+# PERFBOARD_MOUNT_HOLE_INSET_MM if its corner mounting holes differ.
+PERFBOARD_WIDTH = 70.0
+PERFBOARD_DEPTH = 90.0
+PERFBOARD_MOUNT_HOLE_INSET_MM = 3.0
+PERFBOARD_POST_HEIGHT = 7.0
+PERFBOARD_POST_OUTER_D = 7.0
+PERFBOARD_POST_INNER_D = 2.7
 
 # Mesh resolution for cutout edges. Smaller is cleaner but larger STL.
 GRID = 0.8
@@ -227,8 +240,14 @@ def make_body() -> List[Triangle]:
                    w / 2 - WALL, w / 2, side_holes,
                    lambda y, z, x: (x, y, z))
 
-    # Front wall, no cutout.
-    add_box(mesh, -w / 2, w / 2, d / 2 - WALL, d / 2, 0.0, h)
+    # Front wall with two 3.5 mm LFO output jack cutouts.
+    front_holes = [
+        CircleHole(-LFO_CENTER_X_OFFSET, LFO_CENTER_Z, LFO_HOLE_D),
+        CircleHole(LFO_CENTER_X_OFFSET, LFO_CENTER_Z, LFO_HOLE_D),
+    ]
+    add_grid_plate(mesh, -inner_w / 2, inner_w / 2, 0.0, h,
+                   d / 2 - WALL, d / 2, front_holes,
+                   lambda x, z, y: (x, y, z))
 
     # Rear wall with USB/service cutout.
     rear_holes = [RectHole(0.0, USB_CENTER_Z, USB_WINDOW_W, USB_WINDOW_H)]
@@ -247,6 +266,21 @@ def make_body() -> List[Triangle]:
                 h - 1.0,
                 POST_OUTER_D,
                 POST_INNER_D,
+            )
+
+    # Short internal posts for the full-size 70 mm x 90 mm perfboard.
+    board_post_x = PERFBOARD_WIDTH / 2 - PERFBOARD_MOUNT_HOLE_INSET_MM
+    board_post_y = PERFBOARD_DEPTH / 2 - PERFBOARD_MOUNT_HOLE_INSET_MM
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            add_hollow_cylinder(
+                mesh,
+                sx * board_post_x,
+                sy * board_post_y,
+                BOTTOM,
+                BOTTOM + PERFBOARD_POST_HEIGHT,
+                PERFBOARD_POST_OUTER_D,
+                PERFBOARD_POST_INNER_D,
             )
 
     return mesh

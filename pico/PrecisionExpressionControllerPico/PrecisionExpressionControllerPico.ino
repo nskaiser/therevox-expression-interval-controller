@@ -2,10 +2,11 @@
 //
 // Hardware target:
 //   Raspberry Pi Pico H
-//   Adafruit MCP4725 DAC breakout, I2C address 0x62
+//   MCP4728 quad DAC breakout, I2C address 0x60
 //   Adafruit 0.91" 128x32 SSD1306 OLED, I2C address 0x3C
 //   Adafruit rotary encoder + push switch
-//   Two TRS jacks: expression pedal input and Therevox CV output
+//   Two 1/4" TRS jacks: expression pedal input and Therevox expression/CV output
+//   Two 3.5mm TS jacks: dedicated Therevox patch-panel LFO outputs
 //
 // Exact Pico H wiring:
 //   Expression input TRS Ring   -> Pico pin labeled 3V3(OUT), physical pin 36
@@ -13,13 +14,22 @@
 //   Expression input TRS Tip    -> 1k resistor -> Pico pin labeled GP26/ADC0, physical pin 31
 //   GP26/ADC0 side of 1k       -> 100nF capacitor -> GND
 //
-//   MCP4725 red/VCC             -> Pico pin labeled 3V3(OUT), physical pin 36
-//   MCP4725 black/GND           -> Pico pin labeled GND, physical pin 38
-//   MCP4725 blue/SDA            -> Pico pin labeled GP4, physical pin 6
-//   MCP4725 yellow/SCL          -> Pico pin labeled GP5, physical pin 7
-//   MCP4725 VOUT                -> 1k resistor -> output plug physical Tip
+//   MCP4728 VCC                 -> Pico pin labeled 3V3(OUT), physical pin 36
+//   MCP4728 GND                 -> Pico pin labeled GND, physical pin 38
+//   MCP4728 SDA                 -> Pico pin labeled GP4, physical pin 6
+//   MCP4728 SCL                 -> Pico pin labeled GP5, physical pin 7
+//   MCP4728 LDAC                -> GND (required; outputs freeze if LDAC floats high)
+//   MCP4728 VOUTA               -> 1k resistor -> output plug physical Tip
 //   Output plug physical Ring   -> not connected for active external CV
 //   Output TRS Sleeve           -> GND
+//   MCP4728 VOUTB               -> 1k resistor -> LFO 1 3.5mm jack Tip
+//   MCP4728 VOUTC               -> 1k resistor -> LFO 2 3.5mm jack Tip
+//   MCP4728 VOUTD               -> 1k resistor -> optional clock 3.5mm jack Tip
+//   LFO 1/2/clock jack Sleeve   -> GND
+//
+//   The firmware uses MCP4728 multi-write commands (UDAC=0), which set
+//   VREF=VDD and gain=1 on every update and latch outputs regardless of the
+//   LDAC pin state. Grounding LDAC is still recommended.
 //
 //   OLED red/VCC                -> Pico pin labeled 3V3(OUT), physical pin 36
 //   OLED black/GND              -> Pico pin labeled GND, physical pin 38
@@ -39,7 +49,11 @@
 //   LO mode: slow unipolar LFO, 0.05-20 Hz.
 //   FM mode: faster unipolar LFO, 8-160 Hz.
 //   In LO/FM, the expression pedal sweeps LFO speed and the encoder sets depth.
-//   Double-click the encoder to toggle UP/DOWN or LFO polarity.
+//   LFO 1 and LFO 2 are independent dedicated patch-panel CV outputs.
+//   LFO 2 can link to LFO 1 at a rate ratio with a quarter-cycle phase offset.
+//   VOUTD can emit a full-swing clock square derived from LFO 1 or LFO 2.
+//   Double-click the encoder to cycle the active edit target: EXP, LFO1, LFO2.
+//   Repeated single presses on a focused LFO tap-tempo its rate.
 //
 // Tune/calibrate the Therevox with the controller connected and the pedal at heel.
 
@@ -82,8 +96,10 @@ constexpr uint8_t I2C_SCL_PIN = 5;         // Pico GP5, physical pin 7.
 constexpr uint8_t ENCODER_SWITCH_PIN = 13; // Pico GP13, physical pin 17.
 constexpr uint8_t ENCODER_A_PIN = 14;      // Pico GP14, physical pin 19.
 constexpr uint8_t ENCODER_B_PIN = 15;      // Pico GP15, physical pin 20.
-constexpr uint8_t MCP4725_ADDRESS = 0x62;
+constexpr uint8_t MCP4728_ADDRESS = 0x60;
 constexpr uint8_t SSD1306_ADDRESS = 0x3C;
+constexpr uint8_t LFO_OUT_COUNT = 2;
+constexpr uint8_t DAC_CHANNEL_COUNT = 4;
 constexpr uint8_t ADC_BITS = 12;
 constexpr uint16_t ADC_MAX = (1u << ADC_BITS) - 1u;
 constexpr uint8_t PEDAL_OVERSAMPLES = 8;
@@ -111,12 +127,22 @@ constexpr uint8_t DISPLAY_WIDTH = 128;
 constexpr uint8_t DISPLAY_HEIGHT = 32;
 constexpr uint16_t DISPLAY_BUFFER_SIZE = DISPLAY_WIDTH * DISPLAY_HEIGHT / 8;
 constexpr uint32_t SETTINGS_MAGIC = 0x5049434FUL; // PICO
-constexpr uint16_t SETTINGS_VERSION = 10;
+constexpr uint16_t SETTINGS_VERSION = 12;
+constexpr uint16_t SETTINGS_VERSION_PREVIOUS = 11;
+constexpr uint32_t TAP_MIN_MS = 450;
+constexpr uint32_t TAP_MAX_MS = 5000;
 constexpr uint16_t DEFAULT_RANGE_MV = static_cast<uint16_t>(kDefaultUnipolarOctaveMicrovolts / 1000L);
 constexpr uint16_t MAX_OUTPUT_MV = static_cast<uint16_t>(kPicoDacFullScaleMicrovolts / 1000L);
 constexpr uint16_t MAX_OCTAVE_SCALE_MV = MAX_OUTPUT_MV;
 constexpr uint16_t DEFAULT_TUNE_STEP_MV = 10;
 constexpr uint16_t MAX_TUNE_STEP_MV = 250;
+
+enum OutputFocus : uint8_t {
+  OUTPUT_FOCUS_EXP = 0,
+  OUTPUT_FOCUS_LFO1 = 1,
+  OUTPUT_FOCUS_LFO2 = 2,
+  OUTPUT_FOCUS_COUNT = 3,
+};
 
 struct PicoSettings {
   uint32_t magic;
@@ -134,6 +160,50 @@ struct PicoSettings {
   uint8_t lfoLoRate;
   uint8_t lfoFmRate;
   uint8_t lfoDepthPercent;
+  uint8_t outputFocus;
+  uint8_t lfoOutMode[LFO_OUT_COUNT];
+  uint8_t lfoOutWave[LFO_OUT_COUNT];
+  uint8_t lfoOutLoRate[LFO_OUT_COUNT];
+  uint8_t lfoOutFmRate[LFO_OUT_COUNT];
+  uint8_t lfoOutDepthPercent[LFO_OUT_COUNT];
+  uint8_t lfoOutPolarity[LFO_OUT_COUNT];
+  uint8_t lfoPulseWidth;
+  uint8_t lfoOutPulseWidth[LFO_OUT_COUNT];
+  int8_t lfoOutOffsetPercent[LFO_OUT_COUNT];
+  uint8_t lfo2Link;
+  uint8_t lfo2PhaseOffset;
+  uint8_t clockSource;
+  uint16_t rangeMv;
+  uint16_t responseCents;
+  uint16_t toeMapMv[kPicoSemitoneMapCount];
+  uint32_t checksum;
+};
+
+// Exact on-flash layout of settings version 11, kept so an upgrade preserves
+// calibration and the hand-tuned toe map instead of wiping them.
+struct PicoSettingsV11 {
+  uint32_t magic;
+  uint16_t version;
+  uint16_t size;
+  uint16_t heelRaw;
+  uint16_t toeRaw;
+  int8_t semitones;
+  uint8_t invert;
+  uint8_t monitorEnabled;
+  uint8_t bendDirection;
+  uint8_t curveMode;
+  uint8_t outputMode;
+  uint8_t lfoWave;
+  uint8_t lfoLoRate;
+  uint8_t lfoFmRate;
+  uint8_t lfoDepthPercent;
+  uint8_t outputFocus;
+  uint8_t lfoOutMode[LFO_OUT_COUNT];
+  uint8_t lfoOutWave[LFO_OUT_COUNT];
+  uint8_t lfoOutLoRate[LFO_OUT_COUNT];
+  uint8_t lfoOutFmRate[LFO_OUT_COUNT];
+  uint8_t lfoOutDepthPercent[LFO_OUT_COUNT];
+  uint8_t lfoOutPolarity[LFO_OUT_COUNT];
   uint16_t rangeMv;
   uint16_t responseCents;
   uint16_t toeMapMv[kPicoSemitoneMapCount];
@@ -147,21 +217,33 @@ enum CalibrationState {
 };
 
 enum MenuItem : uint8_t {
-  MENU_MODE = 0,
-  MENU_WAVE = 1,
-  MENU_DEPTH = 2,
-  MENU_CURVE = 3,
-  MENU_CAL = 4,
-  MENU_DIR = 5,
-  MENU_DONE = 6,
-  MENU_COUNT = 7,
+  MENU_OUT = 0,
+  MENU_MODE = 1,
+  MENU_WAVE = 2,
+  MENU_DEPTH = 3,
+  MENU_PW = 4,
+  MENU_OFS = 5,
+  MENU_LINK = 6,
+  MENU_PHS = 7,
+  MENU_CLK = 8,
+  MENU_CURVE = 9,
+  MENU_CAL = 10,
+  MENU_DIR = 11,
+  MENU_DONE = 12,
+  MENU_COUNT = 13,
 };
 
 enum MenuEditField : uint8_t {
   MENU_EDIT_NONE = 0,
+  MENU_EDIT_OUT,
   MENU_EDIT_MODE,
   MENU_EDIT_WAVE,
   MENU_EDIT_DEPTH,
+  MENU_EDIT_PW,
+  MENU_EDIT_OFS,
+  MENU_EDIT_LINK,
+  MENU_EDIT_PHS,
+  MENU_EDIT_CLK,
   MENU_EDIT_CURVE,
 };
 
@@ -222,8 +304,10 @@ CalibrationState calState = CAL_IDLE;
 uint16_t currentRaw = 0;
 uint16_t lastActivityRaw = 0;
 int32_t currentOutputMicrovolts = 0;
+int32_t lfoOutOutputMicrovolts[LFO_OUT_COUNT] = {0, 0};
 uint16_t currentDacCode = 0;
-int lastWrittenDacCode = -1;
+uint16_t lfoOutDacCode[LFO_OUT_COUNT] = {0, 0};
+int lastWrittenDacCodes[DAC_CHANNEL_COUNT] = {-1, -1, -1, -1};
 bool dacReady = false;
 bool displayReady = false;
 bool sleeping = false;
@@ -263,18 +347,42 @@ uint8_t lastRenderedMenuEditField = 0xff;
 uint8_t lastRenderedMenuEditValue = 0xff;
 uint8_t lastRenderedCurveMode = 0xff;
 uint8_t lastRenderedBendDirection = 0xff;
+uint8_t lastRenderedOutputFocus = 0xff;
 uint8_t lastRenderedOutputMode = 0xff;
 uint8_t lastRenderedLfoWave = 0xff;
 uint8_t lastRenderedLfoLoRate = 0xff;
 uint8_t lastRenderedLfoFmRate = 0xff;
 uint8_t lastRenderedLfoDepthPercent = 0xff;
+uint8_t lastRenderedLfoOutMode[LFO_OUT_COUNT] = {0xff, 0xff};
+uint8_t lastRenderedLfoOutWave[LFO_OUT_COUNT] = {0xff, 0xff};
+uint8_t lastRenderedLfoOutLoRate[LFO_OUT_COUNT] = {0xff, 0xff};
+uint8_t lastRenderedLfoOutFmRate[LFO_OUT_COUNT] = {0xff, 0xff};
+uint8_t lastRenderedLfoOutDepthPercent[LFO_OUT_COUNT] = {0xff, 0xff};
+uint8_t lastRenderedLfoOutPolarity[LFO_OUT_COUNT] = {0xff, 0xff};
+uint8_t lastRenderedLfoOutPulseWidth[LFO_OUT_COUNT] = {0xff, 0xff};
+int8_t lastRenderedLfoOutOffsetPercent[LFO_OUT_COUNT] = {-128, -128};
+uint8_t lastRenderedLfoPulseWidth = 0xff;
+uint8_t lastRenderedLfo2Link = 0xff;
+uint8_t lastRenderedLfo2PhaseOffset = 0xff;
+uint8_t lastRenderedClockSource = 0xff;
 
 bool menuActive = false;
-uint8_t menuIndex = MENU_MODE;
+uint8_t menuIndex = MENU_OUT;
 uint8_t menuEditField = MENU_EDIT_NONE;
 uint8_t menuEditValue = 0;
 float lfoPhase = 0.0f;
+uint32_t lfoCycle = 0;
 uint32_t lastLfoUs = 0;
+float lfoOutPhase[LFO_OUT_COUNT] = {0.0f, 0.0f};
+uint32_t lfoOutCycle[LFO_OUT_COUNT] = {0, 0};
+uint32_t lastLfoOutUs[LFO_OUT_COUNT] = {0, 0};
+uint16_t clockDacCode = 0;
+uint32_t lastTapMs = 0;
+uint8_t lastTapFocus = 0xff;
+
+// Fixed hash seeds so each output gets its own S+H/drift random sequence.
+constexpr uint32_t LFO_SEED_EXP = 0xE0u;
+constexpr uint32_t LFO_SEED_OUT[LFO_OUT_COUNT] = {0xA1u, 0xB2u};
 
 volatile uint8_t lastEncoderState = 0;
 volatile int8_t encoderTransitionCount = 0;
@@ -314,28 +422,78 @@ void finalizeSettings(PicoSettings& value) {
 }
 
 bool settingsValid(const PicoSettings& value) {
+  if (!(value.magic == SETTINGS_MAGIC &&
+        value.version == SETTINGS_VERSION &&
+        value.size == sizeof(PicoSettings) &&
+        value.checksum == settingsChecksum(value) &&
+        value.heelRaw <= ADC_MAX &&
+        value.toeRaw <= ADC_MAX &&
+        value.rangeMv <= MAX_OCTAVE_SCALE_MV &&
+        value.responseCents <= 6000 &&
+        value.bendDirection <= static_cast<uint8_t>(kPicoBendDown) &&
+        value.curveMode < kPicoCurveCount &&
+        value.outputMode < kPicoOutputModeCount &&
+        value.lfoWave < kPicoLfoWaveCount &&
+        value.lfoLoRate <= kPicoLfoLoRateSteps &&
+        value.lfoFmRate <= kPicoLfoFmRateSteps &&
+        value.lfoDepthPercent >= kPicoLfoMinDepthPercent &&
+        value.lfoDepthPercent <= kPicoLfoMaxDepthPercent &&
+        ((value.lfoDepthPercent - kPicoLfoMinDepthPercent) % kPicoLfoDepthStepPercent == 0) &&
+        value.outputFocus < OUTPUT_FOCUS_COUNT &&
+        toeMapValid(value) &&
+        value.semitones >= kPicoMinSemitones &&
+        value.semitones <= kPicoMaxSemitones &&
+        ((value.bendDirection == static_cast<uint8_t>(kPicoBendDown) && value.semitones <= 0) ||
+         (value.bendDirection == static_cast<uint8_t>(kPicoBendUp) && value.semitones >= 0)))) {
+    return false;
+  }
+
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    if (value.lfoOutMode[i] != kPicoOutputLfoLo &&
+        value.lfoOutMode[i] != kPicoOutputLfoFm) {
+      return false;
+    }
+    if (value.lfoOutWave[i] >= kPicoLfoWaveCount ||
+        value.lfoOutLoRate[i] > kPicoLfoLoRateSteps ||
+        value.lfoOutFmRate[i] > kPicoLfoFmRateSteps ||
+        value.lfoOutDepthPercent[i] < kPicoLfoMinDepthPercent ||
+        value.lfoOutDepthPercent[i] > kPicoLfoMaxDepthPercent ||
+        ((value.lfoOutDepthPercent[i] - kPicoLfoMinDepthPercent) %
+             kPicoLfoDepthStepPercent !=
+         0) ||
+        value.lfoOutPolarity[i] > 1) {
+      return false;
+    }
+    if (value.lfoOutPulseWidth[i] < kPicoLfoMinPulseWidthPercent ||
+        value.lfoOutPulseWidth[i] > kPicoLfoMaxPulseWidthPercent ||
+        value.lfoOutOffsetPercent[i] < kPicoLfoMinOffsetPercent ||
+        value.lfoOutOffsetPercent[i] > kPicoLfoMaxOffsetPercent) {
+      return false;
+    }
+  }
+
+  return value.lfoPulseWidth >= kPicoLfoMinPulseWidthPercent &&
+         value.lfoPulseWidth <= kPicoLfoMaxPulseWidthPercent &&
+         value.lfo2Link < kPicoLfoLinkCount &&
+         value.lfo2PhaseOffset < kPicoLfoPhaseOffsetCount &&
+         value.clockSource < kPicoClockSourceCount;
+}
+
+uint32_t settingsChecksumV11(const PicoSettingsV11& value) {
+  return fnv1a(reinterpret_cast<const uint8_t*>(&value), offsetof(PicoSettingsV11, checksum));
+}
+
+bool settingsValidV11(const PicoSettingsV11& value) {
   return value.magic == SETTINGS_MAGIC &&
-         value.version == SETTINGS_VERSION &&
-         value.size == sizeof(PicoSettings) &&
-         value.checksum == settingsChecksum(value) &&
+         value.version == SETTINGS_VERSION_PREVIOUS &&
+         value.size == sizeof(PicoSettingsV11) &&
+         value.checksum == settingsChecksumV11(value) &&
          value.heelRaw <= ADC_MAX &&
          value.toeRaw <= ADC_MAX &&
          value.rangeMv <= MAX_OCTAVE_SCALE_MV &&
          value.responseCents <= 6000 &&
-         value.bendDirection <= static_cast<uint8_t>(kPicoBendDown) &&
-         value.curveMode < kPicoCurveCount &&
-         value.outputMode < kPicoOutputModeCount &&
-         value.lfoWave < kPicoLfoWaveCount &&
-         value.lfoLoRate <= kPicoLfoLoRateSteps &&
-         value.lfoFmRate <= kPicoLfoFmRateSteps &&
-         value.lfoDepthPercent >= kPicoLfoMinDepthPercent &&
-         value.lfoDepthPercent <= kPicoLfoMaxDepthPercent &&
-         ((value.lfoDepthPercent - kPicoLfoMinDepthPercent) % kPicoLfoDepthStepPercent == 0) &&
-         toeMapValid(value) &&
          value.semitones >= kPicoMinSemitones &&
-         value.semitones <= kPicoMaxSemitones &&
-         ((value.bendDirection == static_cast<uint8_t>(kPicoBendDown) && value.semitones <= 0) ||
-          (value.bendDirection == static_cast<uint8_t>(kPicoBendUp) && value.semitones >= 0));
+         value.semitones <= kPicoMaxSemitones;
 }
 
 PicoSettings makeDefaultPicoSettings() {
@@ -353,6 +511,21 @@ PicoSettings makeDefaultPicoSettings() {
   value.lfoLoRate = kPicoLfoLoRateSteps;
   value.lfoFmRate = kPicoLfoFmRateSteps;
   value.lfoDepthPercent = kPicoLfoMaxDepthPercent;
+  value.outputFocus = OUTPUT_FOCUS_EXP;
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    value.lfoOutMode[i] = kPicoOutputLfoLo;
+    value.lfoOutWave[i] = i == 0 ? kPicoLfoSine : kPicoLfoTriangle;
+    value.lfoOutLoRate[i] = kPicoDefaultLfoLoRate;
+    value.lfoOutFmRate[i] = kPicoDefaultLfoFmRate;
+    value.lfoOutDepthPercent[i] = kPicoLfoMaxDepthPercent;
+    value.lfoOutPolarity[i] = static_cast<uint8_t>(kPicoBendUp);
+    value.lfoOutPulseWidth[i] = kPicoDefaultLfoPulseWidthPercent;
+    value.lfoOutOffsetPercent[i] = 0;
+  }
+  value.lfoPulseWidth = kPicoDefaultLfoPulseWidthPercent;
+  value.lfo2Link = kPicoLfoLinkOff;
+  value.lfo2PhaseOffset = kPicoLfoPhase0;
+  value.clockSource = kPicoClockOff;
   value.rangeMv = DEFAULT_RANGE_MV;
   value.responseCents = kDefaultFullScaleResponseCents;
   fillToeMapFromCurrentFit(value);
@@ -398,11 +571,26 @@ void forceDisplayUpdate() {
   lastRenderedMenuEditValue = 0xff;
   lastRenderedCurveMode = 0xff;
   lastRenderedBendDirection = 0xff;
+  lastRenderedOutputFocus = 0xff;
   lastRenderedOutputMode = 0xff;
   lastRenderedLfoWave = 0xff;
   lastRenderedLfoLoRate = 0xff;
   lastRenderedLfoFmRate = 0xff;
   lastRenderedLfoDepthPercent = 0xff;
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    lastRenderedLfoOutMode[i] = 0xff;
+    lastRenderedLfoOutWave[i] = 0xff;
+    lastRenderedLfoOutLoRate[i] = 0xff;
+    lastRenderedLfoOutFmRate[i] = 0xff;
+    lastRenderedLfoOutDepthPercent[i] = 0xff;
+    lastRenderedLfoOutPolarity[i] = 0xff;
+    lastRenderedLfoOutPulseWidth[i] = 0xff;
+    lastRenderedLfoOutOffsetPercent[i] = -128;
+  }
+  lastRenderedLfoPulseWidth = 0xff;
+  lastRenderedLfo2Link = 0xff;
+  lastRenderedLfo2PhaseOffset = 0xff;
+  lastRenderedClockSource = 0xff;
 }
 
 void saveSettings() {
@@ -426,6 +614,49 @@ void loadSettings() {
   if (settingsValid(stored)) {
     settings = stored;
     settingsDirty = false;
+    return;
+  }
+
+  PicoSettingsV11 storedV11;
+  EEPROM.get(0, storedV11);
+  if (settingsValidV11(storedV11)) {
+    settings = makeDefaultPicoSettings();
+    settings.heelRaw = storedV11.heelRaw;
+    settings.toeRaw = storedV11.toeRaw;
+    settings.semitones = storedV11.semitones;
+    settings.invert = storedV11.invert;
+    settings.monitorEnabled = storedV11.monitorEnabled;
+    settings.bendDirection =
+        storedV11.bendDirection <= static_cast<uint8_t>(kPicoBendDown)
+            ? storedV11.bendDirection
+            : static_cast<uint8_t>(kPicoBendUp);
+    settings.curveMode = clampPicoCurveMode(storedV11.curveMode);
+    settings.outputMode = clampPicoOutputMode(storedV11.outputMode);
+    settings.lfoWave = clampPicoLfoWave(storedV11.lfoWave);
+    settings.lfoLoRate = clampPicoLfoRateStep(storedV11.lfoLoRate, kPicoOutputLfoLo);
+    settings.lfoFmRate = clampPicoLfoRateStep(storedV11.lfoFmRate, kPicoOutputLfoFm);
+    settings.lfoDepthPercent = clampPicoLfoDepthPercent(storedV11.lfoDepthPercent);
+    settings.outputFocus =
+        storedV11.outputFocus < OUTPUT_FOCUS_COUNT ? storedV11.outputFocus : OUTPUT_FOCUS_EXP;
+    for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+      settings.lfoOutMode[i] = clampPicoLfoOutputMode(storedV11.lfoOutMode[i]);
+      settings.lfoOutWave[i] = clampPicoLfoWave(storedV11.lfoOutWave[i]);
+      settings.lfoOutLoRate[i] =
+          clampPicoLfoRateStep(storedV11.lfoOutLoRate[i], kPicoOutputLfoLo);
+      settings.lfoOutFmRate[i] =
+          clampPicoLfoRateStep(storedV11.lfoOutFmRate[i], kPicoOutputLfoFm);
+      settings.lfoOutDepthPercent[i] =
+          clampPicoLfoDepthPercent(storedV11.lfoOutDepthPercent[i]);
+      settings.lfoOutPolarity[i] = storedV11.lfoOutPolarity[i] > 1
+                                       ? static_cast<uint8_t>(kPicoBendUp)
+                                       : storedV11.lfoOutPolarity[i];
+    }
+    settings.rangeMv = storedV11.rangeMv;
+    settings.responseCents = storedV11.responseCents;
+    memcpy(settings.toeMapMv, storedV11.toeMapMv, sizeof(settings.toeMapMv));
+    finalizeSettings(settings);
+    settingsDirty = true;
+    Serial.println(F("Settings migrated from version 11; calibration and toe map preserved"));
     return;
   }
 #endif
@@ -483,6 +714,42 @@ const char* directionLabel() {
   return currentBendDirection() == kPicoBendDown ? "DOWN" : "UP";
 }
 
+uint8_t currentOutputFocus() {
+  return settings.outputFocus < OUTPUT_FOCUS_COUNT ? settings.outputFocus : OUTPUT_FOCUS_EXP;
+}
+
+bool outputFocusIsExp() {
+  return currentOutputFocus() == OUTPUT_FOCUS_EXP;
+}
+
+bool outputFocusIsLfoOut() {
+  return !outputFocusIsExp();
+}
+
+uint8_t currentLfoOutIndex() {
+  return currentOutputFocus() == OUTPUT_FOCUS_LFO2 ? 1 : 0;
+}
+
+const char* outputFocusLabel(uint8_t focus) {
+  switch (focus < OUTPUT_FOCUS_COUNT ? focus : OUTPUT_FOCUS_EXP) {
+    case OUTPUT_FOCUS_LFO1:
+      return "LFO1";
+    case OUTPUT_FOCUS_LFO2:
+      return "LFO2";
+    case OUTPUT_FOCUS_EXP:
+    default:
+      return "EXP";
+  }
+}
+
+const char* currentOutputFocusLabel() {
+  return outputFocusLabel(currentOutputFocus());
+}
+
+const char* polarityLabel(uint8_t polarity) {
+  return polarity == static_cast<uint8_t>(kPicoBendDown) ? "DN" : "UP";
+}
+
 bool outputModeIsLfo() {
   return settings.outputMode == kPicoOutputLfoLo || settings.outputMode == kPicoOutputLfoFm;
 }
@@ -535,6 +802,49 @@ float currentLfoRateHz() {
   return computePicoLfoRateHzForPedal(settings.outputMode, pedalState.filtered, currentLfoRateStep());
 }
 
+uint8_t lfoOutRateStep(uint8_t index) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  return settings.lfoOutMode[safeIndex] == kPicoOutputLfoFm ? settings.lfoOutFmRate[safeIndex]
+                                                            : settings.lfoOutLoRate[safeIndex];
+}
+
+float lfoOutRateHz(uint8_t index) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  return computePicoLfoRateHz(settings.lfoOutMode[safeIndex], lfoOutRateStep(safeIndex));
+}
+
+float currentFocusedLfoRateHz() {
+  if (outputFocusIsLfoOut()) {
+    return lfoOutRateHz(currentLfoOutIndex());
+  }
+  return computePicoLfoRateHz(settings.outputMode, currentLfoRateStep());
+}
+
+uint8_t currentFocusedLfoDepthPercent() {
+  if (outputFocusIsLfoOut()) {
+    return settings.lfoOutDepthPercent[currentLfoOutIndex()];
+  }
+  return settings.lfoDepthPercent;
+}
+
+uint8_t currentFocusedLfoWave() {
+  if (outputFocusIsLfoOut()) {
+    return settings.lfoOutWave[currentLfoOutIndex()];
+  }
+  return settings.lfoWave;
+}
+
+uint8_t currentFocusedOutputMode() {
+  if (outputFocusIsLfoOut()) {
+    return settings.lfoOutMode[currentLfoOutIndex()];
+  }
+  return settings.outputMode;
+}
+
+const char* currentFocusedLfoWaveDisplayLabel() {
+  return picoLfoWaveDisplayLabel(currentFocusedLfoWave());
+}
+
 void formatLfoRate(char* out, size_t outSize, float hz) {
   if (hz < 10.0f) {
     snprintf(out, outSize, "%.2fHZ", hz);
@@ -566,9 +876,15 @@ void updateOutputFromPedalState() {
     lastLfoUs = nowUs;
     dt = clampValue(dt, 0.0f, 0.050f);
     lfoPhase += currentLfoRateHz() * dt;
-    lfoPhase -= floorf(lfoPhase);
+    float wrapped = floorf(lfoPhase);
+    lfoCycle += static_cast<uint32_t>(wrapped);
+    lfoPhase -= wrapped;
 
-    float value = computePicoLfoWaveValue(lfoPhase, settings.lfoWave);
+    float value = computePicoLfoWaveValue(lfoPhase,
+                                          settings.lfoWave,
+                                          lfoCycle,
+                                          LFO_SEED_EXP,
+                                          settings.lfoPulseWidth);
     if (currentBendDirection() == kPicoBendDown) {
       value = 1.0f - value;
     }
@@ -582,7 +898,69 @@ void updateOutputFromPedalState() {
                                           noBendOutputMicrovolts(),
                                           toeOutputMicrovoltsForSemitone(settings.semitones));
   }
-  currentDacCode = microvoltsToMcp4725Code(currentOutputMicrovolts);
+  currentDacCode = microvoltsToMcp4728Code(currentOutputMicrovolts);
+}
+
+bool lfo2Linked() {
+  return settings.lfo2Link != kPicoLfoLinkOff;
+}
+
+void updateLfoOutState(uint8_t index) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+
+  if (safeIndex == 1 && lfo2Linked()) {
+    // LFO2 rides LFO1's phase so the pair can never drift apart.
+    computePicoLinkedPhase(lfoOutPhase[0],
+                           lfoOutCycle[0],
+                           settings.lfo2Link,
+                           settings.lfo2PhaseOffset,
+                           &lfoOutPhase[1],
+                           &lfoOutCycle[1]);
+    lastLfoOutUs[1] = 0;
+  } else {
+    uint32_t nowUs = micros();
+    float dt = lastLfoOutUs[safeIndex] == 0
+                   ? static_cast<float>(CONTROL_PERIOD_US) / 1000000.0f
+                   : static_cast<float>(nowUs - lastLfoOutUs[safeIndex]) / 1000000.0f;
+    lastLfoOutUs[safeIndex] = nowUs;
+    dt = clampValue(dt, 0.0f, 0.050f);
+
+    lfoOutPhase[safeIndex] += lfoOutRateHz(safeIndex) * dt;
+    float wrapped = floorf(lfoOutPhase[safeIndex]);
+    lfoOutCycle[safeIndex] += static_cast<uint32_t>(wrapped);
+    lfoOutPhase[safeIndex] -= wrapped;
+  }
+
+  float value = computePicoLfoWaveValue(lfoOutPhase[safeIndex],
+                                        settings.lfoOutWave[safeIndex],
+                                        lfoOutCycle[safeIndex],
+                                        LFO_SEED_OUT[safeIndex],
+                                        settings.lfoOutPulseWidth[safeIndex]);
+  if (settings.lfoOutPolarity[safeIndex] == static_cast<uint8_t>(kPicoBendDown)) {
+    value = 1.0f - value;
+  }
+  value = attenuatePicoLfoWaveValue(value, settings.lfoOutDepthPercent[safeIndex]);
+  value = offsetPicoLfoWaveValue(value, settings.lfoOutOffsetPercent[safeIndex]);
+  lfoOutOutputMicrovolts[safeIndex] =
+      static_cast<int32_t>(lroundf(value * static_cast<float>(kPicoDacFullScaleMicrovolts)));
+  lfoOutDacCode[safeIndex] = microvoltsToMcp4728Code(lfoOutOutputMicrovolts[safeIndex]);
+}
+
+void updateClockState() {
+  if (settings.clockSource == kPicoClockOff) {
+    clockDacCode = 0;
+    return;
+  }
+  uint8_t source = settings.clockSource == kPicoClockLfo2 ? 1 : 0;
+  // Full-swing square at the source LFO's rate, ignoring its depth/offset.
+  clockDacCode = lfoOutPhase[source] < 0.5f ? kMcp4728MaxCode : 0;
+}
+
+void updateLfoOutStates() {
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    updateLfoOutState(i);
+  }
+  updateClockState();
 }
 
 bool probeI2c(uint8_t address) {
@@ -590,51 +968,102 @@ bool probeI2c(uint8_t address) {
   return Wire.endTransmission() == 0;
 }
 
-bool writeMcp4725(uint16_t code) {
-  code = clampValue<uint16_t>(code, 0, kMcp4725MaxCode);
-  Wire.beginTransmission(MCP4725_ADDRESS);
-  Wire.write(0x40);
-  Wire.write(static_cast<uint8_t>(code >> 4));
-  Wire.write(static_cast<uint8_t>((code & 0x0F) << 4));
+uint16_t dacChannelCode(uint8_t channel) {
+  switch (channel) {
+    case 0:
+      return currentDacCode;
+    case 1:
+      return lfoOutDacCode[0];
+    case 2:
+      return lfoOutDacCode[1];
+    case 3:
+    default:
+      return clockDacCode;
+  }
+}
+
+// Multi-write (UDAC=0) rather than fast-write: it latches the outputs even if
+// the LDAC pin floats high, and stamps VREF=VDD / gain=1 / power-on into every
+// update so a previously reconfigured chip cannot skew the output scale.
+bool writeMcp4728(uint16_t channelA, uint16_t channelB, uint16_t channelC, uint16_t channelD) {
+  uint16_t codes[DAC_CHANNEL_COUNT] = {
+      clampValue<uint16_t>(channelA, 0, kMcp4728MaxCode),
+      clampValue<uint16_t>(channelB, 0, kMcp4728MaxCode),
+      clampValue<uint16_t>(channelC, 0, kMcp4728MaxCode),
+      clampValue<uint16_t>(channelD, 0, kMcp4728MaxCode),
+  };
+
+  Wire.beginTransmission(MCP4728_ADDRESS);
+  for (uint8_t i = 0; i < DAC_CHANNEL_COUNT; ++i) {
+    Wire.write(static_cast<uint8_t>(0x40 | (i << 1)));
+    Wire.write(static_cast<uint8_t>((codes[i] >> 8) & 0x0F));
+    Wire.write(static_cast<uint8_t>(codes[i] & 0xFF));
+  }
   return Wire.endTransmission() == 0;
 }
 
-bool dacCodeChangeShouldWrite(uint16_t code) {
-  if (lastWrittenDacCode < 0) {
+// Program 0V into every channel's power-on EEPROM so the jacks come up silent
+// between power-on and firmware boot. Run on demand via "dac eeprom".
+bool programMcp4728PowerOnDefaults() {
+  Wire.beginTransmission(MCP4728_ADDRESS);
+  Wire.write(0x50); // Sequential write with EEPROM, starting at channel A, UDAC=0.
+  for (uint8_t i = 0; i < DAC_CHANNEL_COUNT; ++i) {
+    Wire.write(0x00); // VREF=VDD, normal power, gain=1, code high nibble 0.
+    Wire.write(0x00);
+  }
+  if (Wire.endTransmission() != 0) {
+    return false;
+  }
+  delay(60); // EEPROM write time.
+  return true;
+}
+
+bool dacCodeChangeShouldWrite(uint8_t channel, uint16_t code) {
+  if (channel >= DAC_CHANNEL_COUNT || lastWrittenDacCodes[channel] < 0) {
     return true;
   }
-  if (code == 0 || code == kMcp4725MaxCode) {
-    return static_cast<int>(code) != lastWrittenDacCode;
+  if (code == 0 || code == kMcp4728MaxCode) {
+    return static_cast<int>(code) != lastWrittenDacCodes[channel];
   }
-  int delta = abs(static_cast<int>(code) - lastWrittenDacCode);
+  int delta = abs(static_cast<int>(code) - lastWrittenDacCodes[channel]);
   return delta >= static_cast<int>(DAC_CODE_DEADBAND);
 }
 
 void writeOutputToDac(bool force = false) {
-  currentDacCode = microvoltsToMcp4725Code(currentOutputMicrovolts);
+  currentDacCode = microvoltsToMcp4728Code(currentOutputMicrovolts);
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    lfoOutDacCode[i] = microvoltsToMcp4728Code(lfoOutOutputMicrovolts[i]);
+  }
   if (!dacReady) {
     return;
   }
-  if (static_cast<int>(currentDacCode) == lastWrittenDacCode) {
+
+  bool shouldWrite = force;
+  for (uint8_t channel = 0; channel < DAC_CHANNEL_COUNT; ++channel) {
+    if (dacCodeChangeShouldWrite(channel, dacChannelCode(channel))) {
+      shouldWrite = true;
+      break;
+    }
+  }
+  if (!shouldWrite) {
     return;
   }
-  if (!force && !dacCodeChangeShouldWrite(currentDacCode)) {
-    return;
-  }
+
   uint32_t nowUs = micros();
-  uint32_t minIntervalUs = outputModeIsLfo() ? DAC_LFO_WRITE_MIN_INTERVAL_US
-                                             : DAC_PEDAL_WRITE_MIN_INTERVAL_US;
+  uint32_t minIntervalUs = DAC_LFO_WRITE_MIN_INTERVAL_US;
   if (!force &&
       static_cast<uint32_t>(nowUs - lastDacWriteUs) < minIntervalUs) {
     return;
   }
 
-  if (writeMcp4725(currentDacCode)) {
-    lastWrittenDacCode = currentDacCode;
+  if (writeMcp4728(currentDacCode, lfoOutDacCode[0], lfoOutDacCode[1], clockDacCode)) {
+    for (uint8_t channel = 0; channel < DAC_CHANNEL_COUNT; ++channel) {
+      lastWrittenDacCodes[channel] = dacChannelCode(channel);
+    }
     lastDacWriteUs = nowUs;
   } else {
     dacReady = false;
-    Serial.println(F("MCP4725 write failed; output paused until dac probe passes"));
+    Serial.println(F("MCP4728 write failed; outputs paused until dac probe passes"));
   }
 }
 
@@ -642,6 +1071,7 @@ void refreshControlNow() {
   currentRaw = readPedalRaw();
   pedalState = pedalProcessor.process(currentRaw, 1000.0f);
   updateOutputFromPedalState();
+  updateLfoOutStates();
   if (!sleeping) {
     writeOutputToDac(true);
   }
@@ -796,6 +1226,8 @@ uint16_t glyph3x5(char c) {
       return GLYPH3X5(5, 5, 5, 5, 2);
     case 'W':
       return GLYPH3X5(5, 5, 7, 7, 5);
+    case 'X':
+      return GLYPH3X5(5, 5, 2, 5, 5);
     case 'Y':
       return GLYPH3X5(5, 5, 2, 2, 2);
     case 'Z':
@@ -862,20 +1294,92 @@ void sendDisplayBuffer() {
   }
 }
 
+bool menuItemVisible(uint8_t item) {
+  bool focusedLfoSettingsApply = outputFocusIsLfoOut() || outputModeIsLfo();
+  if ((item == MENU_WAVE || item == MENU_DEPTH) && !focusedLfoSettingsApply) {
+    return false;
+  }
+  if (item == MENU_PW &&
+      (!focusedLfoSettingsApply || currentFocusedLfoWave() != kPicoLfoPulse)) {
+    return false;
+  }
+  if (item == MENU_OFS && !outputFocusIsLfoOut()) {
+    return false;
+  }
+  if ((item == MENU_LINK || item == MENU_PHS) &&
+      currentOutputFocus() != OUTPUT_FOCUS_LFO2) {
+    return false;
+  }
+  if (item == MENU_PHS && !lfo2Linked()) {
+    return false;
+  }
+  if ((item == MENU_CURVE || item == MENU_CAL) && outputFocusIsLfoOut()) {
+    return false;
+  }
+  return item < MENU_COUNT;
+}
+
+uint8_t visibleMenuItemCount() {
+  uint8_t count = 0;
+  for (uint8_t item = 0; item < MENU_COUNT; ++item) {
+    if (menuItemVisible(item)) {
+      ++count;
+    }
+  }
+  return count;
+}
+
+uint8_t visibleMenuItemPosition(uint8_t selectedItem) {
+  uint8_t position = 0;
+  for (uint8_t item = 0; item < MENU_COUNT; ++item) {
+    if (menuItemVisible(item)) {
+      ++position;
+    }
+    if (item == selectedItem) {
+      return position;
+    }
+  }
+  return 1;
+}
+
+uint8_t lfoModeEditValueToMode(uint8_t value) {
+  return value == 0 ? kPicoOutputLfoLo : kPicoOutputLfoFm;
+}
+
+uint8_t lfoModeEditValueFromMode(uint8_t mode) {
+  return clampPicoLfoOutputMode(mode) == kPicoOutputLfoFm ? 1 : 0;
+}
+
+const char* lfoModeEditValueLabel(uint8_t value) {
+  return picoOutputModeDisplayLabel(lfoModeEditValueToMode(value));
+}
+
 const char* menuItemTitle(uint8_t item) {
   switch (item) {
+    case MENU_OUT:
+      return "OUT";
     case MENU_MODE:
       return "MODE";
     case MENU_WAVE:
       return "WAVE";
     case MENU_DEPTH:
       return "DEPTH";
+    case MENU_PW:
+      return "PW";
+    case MENU_OFS:
+      return "OFS";
+    case MENU_LINK:
+      return "LINK";
+    case MENU_PHS:
+      return "PHS";
+    case MENU_CLK:
+      return "CLK";
     case MENU_CURVE:
       return "CURVE";
     case MENU_CAL:
       return "CAL";
     case MENU_DIR:
-      return outputModeIsLfo() ? "POL" : "DIR";
+      return outputFocusIsLfoOut() || outputModeIsLfo() ? "POL" : "DIR";
     case MENU_DONE:
       return "DONE";
     default:
@@ -883,23 +1387,89 @@ const char* menuItemTitle(uint8_t item) {
   }
 }
 
+uint8_t currentFocusedLfoPulseWidth() {
+  if (outputFocusIsLfoOut()) {
+    return settings.lfoOutPulseWidth[currentLfoOutIndex()];
+  }
+  return settings.lfoPulseWidth;
+}
+
+const char* lfoLinkDisplayLabel(uint8_t link) {
+  switch (clampPicoLfoLink(link)) {
+    case kPicoLfoLink1to1:
+      return "1:1";
+    case kPicoLfoLink1to2:
+      return "1:2";
+    case kPicoLfoLink1to4:
+      return "1:4";
+    case kPicoLfoLink3to2:
+      return "3:2";
+    case kPicoLfoLink2to1:
+      return "2:1";
+    case kPicoLfoLink4to1:
+      return "4:1";
+    case kPicoLfoLinkOff:
+    default:
+      return "OFF";
+  }
+}
+
+const char* lfoPhaseOffsetDisplayLabel(uint8_t phaseOffset) {
+  switch (clampPicoLfoPhaseOffset(phaseOffset)) {
+    case kPicoLfoPhase90:
+      return "90";
+    case kPicoLfoPhase180:
+      return "180";
+    case kPicoLfoPhase270:
+      return "270";
+    case kPicoLfoPhase0:
+    default:
+      return "0";
+  }
+}
+
 const char* menuItemValue(uint8_t item) {
   switch (item) {
+    case MENU_OUT:
+      return currentOutputFocusLabel();
     case MENU_MODE:
-      return outputModeDisplayLabel();
+      return outputFocusIsLfoOut()
+                 ? picoOutputModeDisplayLabel(settings.lfoOutMode[currentLfoOutIndex()])
+                 : outputModeDisplayLabel();
     case MENU_WAVE:
-      return lfoWaveDisplayLabel();
+      return outputFocusIsLfoOut()
+                 ? picoLfoWaveDisplayLabel(settings.lfoOutWave[currentLfoOutIndex()])
+                 : lfoWaveDisplayLabel();
     case MENU_DEPTH: {
       static char depth[8];
-      formatLfoDepth(depth, sizeof(depth), settings.lfoDepthPercent);
+      formatLfoDepth(depth, sizeof(depth), currentFocusedLfoDepthPercent());
       return depth;
     }
+    case MENU_PW: {
+      static char pw[8];
+      snprintf(pw, sizeof(pw), "%u%%", currentFocusedLfoPulseWidth());
+      return pw;
+    }
+    case MENU_OFS: {
+      static char ofs[8];
+      snprintf(ofs, sizeof(ofs), "%+d%%",
+               static_cast<int>(settings.lfoOutOffsetPercent[currentLfoOutIndex()]));
+      return ofs;
+    }
+    case MENU_LINK:
+      return lfoLinkDisplayLabel(settings.lfo2Link);
+    case MENU_PHS:
+      return lfoPhaseOffsetDisplayLabel(settings.lfo2PhaseOffset);
+    case MENU_CLK:
+      return picoClockSourceDisplayLabel(settings.clockSource);
     case MENU_CURVE:
       return curveDisplayLabel();
     case MENU_CAL:
       return "PEDAL";
     case MENU_DIR:
-      return directionLabel();
+      return outputFocusIsLfoOut()
+                 ? polarityLabel(settings.lfoOutPolarity[currentLfoOutIndex()])
+                 : directionLabel();
     case MENU_DONE:
       return "OK";
     default:
@@ -909,12 +1479,24 @@ const char* menuItemValue(uint8_t item) {
 
 const char* menuEditTitle(uint8_t field) {
   switch (field) {
+    case MENU_EDIT_OUT:
+      return "SET OUT";
     case MENU_EDIT_MODE:
       return "SET MODE";
     case MENU_EDIT_WAVE:
       return "SET WAVE";
     case MENU_EDIT_DEPTH:
       return "SET DEP";
+    case MENU_EDIT_PW:
+      return "SET PW";
+    case MENU_EDIT_OFS:
+      return "SET OFS";
+    case MENU_EDIT_LINK:
+      return "SET LINK";
+    case MENU_EDIT_PHS:
+      return "SET PHS";
+    case MENU_EDIT_CLK:
+      return "SET CLK";
     case MENU_EDIT_CURVE:
       return "SET CURVE";
     default:
@@ -924,12 +1506,24 @@ const char* menuEditTitle(uint8_t field) {
 
 uint8_t menuEditValueCount(uint8_t field) {
   switch (field) {
+    case MENU_EDIT_OUT:
+      return OUTPUT_FOCUS_COUNT;
     case MENU_EDIT_MODE:
-      return kPicoOutputModeCount;
+      return outputFocusIsLfoOut() ? 2 : kPicoOutputModeCount;
     case MENU_EDIT_WAVE:
       return kPicoLfoWaveCount;
     case MENU_EDIT_DEPTH:
       return kPicoLfoDepthStepCount;
+    case MENU_EDIT_PW:
+      return kPicoLfoPulseWidthStepCount;
+    case MENU_EDIT_OFS:
+      return kPicoLfoOffsetStepCount;
+    case MENU_EDIT_LINK:
+      return kPicoLfoLinkCount;
+    case MENU_EDIT_PHS:
+      return kPicoLfoPhaseOffsetCount;
+    case MENU_EDIT_CLK:
+      return kPicoClockSourceCount;
     case MENU_EDIT_CURVE:
       return kPicoCurveCount;
     default:
@@ -939,12 +1533,28 @@ uint8_t menuEditValueCount(uint8_t field) {
 
 uint8_t currentMenuEditValue(uint8_t field) {
   switch (field) {
+    case MENU_EDIT_OUT:
+      return currentOutputFocus();
     case MENU_EDIT_MODE:
-      return settings.outputMode;
+      return outputFocusIsLfoOut()
+                 ? lfoModeEditValueFromMode(settings.lfoOutMode[currentLfoOutIndex()])
+                 : settings.outputMode;
     case MENU_EDIT_WAVE:
-      return settings.lfoWave;
+      return outputFocusIsLfoOut() ? settings.lfoOutWave[currentLfoOutIndex()]
+                                   : settings.lfoWave;
     case MENU_EDIT_DEPTH:
-      return picoLfoDepthIndexFromPercent(settings.lfoDepthPercent);
+      return picoLfoDepthIndexFromPercent(currentFocusedLfoDepthPercent());
+    case MENU_EDIT_PW:
+      return picoLfoPulseWidthIndexFromPercent(currentFocusedLfoPulseWidth());
+    case MENU_EDIT_OFS:
+      return picoLfoOffsetIndexFromPercent(
+          settings.lfoOutOffsetPercent[currentLfoOutIndex()]);
+    case MENU_EDIT_LINK:
+      return settings.lfo2Link;
+    case MENU_EDIT_PHS:
+      return settings.lfo2PhaseOffset;
+    case MENU_EDIT_CLK:
+      return settings.clockSource;
     case MENU_EDIT_CURVE:
       return settings.curveMode;
     default:
@@ -954,8 +1564,11 @@ uint8_t currentMenuEditValue(uint8_t field) {
 
 const char* menuEditValueLabel(uint8_t field, uint8_t value) {
   switch (field) {
+    case MENU_EDIT_OUT:
+      return outputFocusLabel(value);
     case MENU_EDIT_MODE:
-      return picoOutputModeDisplayLabel(value);
+      return outputFocusIsLfoOut() ? lfoModeEditValueLabel(value)
+                                   : picoOutputModeDisplayLabel(value);
     case MENU_EDIT_WAVE:
       return picoLfoWaveDisplayLabel(value);
     case MENU_EDIT_DEPTH: {
@@ -963,11 +1576,64 @@ const char* menuEditValueLabel(uint8_t field, uint8_t value) {
       formatLfoDepth(depth, sizeof(depth), picoLfoDepthPercentFromIndex(value));
       return depth;
     }
+    case MENU_EDIT_PW: {
+      static char pw[8];
+      snprintf(pw, sizeof(pw), "%u%%", picoLfoPulseWidthPercentFromIndex(value));
+      return pw;
+    }
+    case MENU_EDIT_OFS: {
+      static char ofs[8];
+      snprintf(ofs, sizeof(ofs), "%+d%%",
+               static_cast<int>(picoLfoOffsetPercentFromIndex(value)));
+      return ofs;
+    }
+    case MENU_EDIT_LINK:
+      return lfoLinkDisplayLabel(value);
+    case MENU_EDIT_PHS:
+      return lfoPhaseOffsetDisplayLabel(value);
+    case MENU_EDIT_CLK:
+      return picoClockSourceDisplayLabel(value);
     case MENU_EDIT_CURVE:
       return picoCurveDisplayLabel(value);
     default:
       return "";
   }
+}
+
+bool lfoOutRenderStateUnchanged() {
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    if (lastRenderedLfoOutMode[i] != settings.lfoOutMode[i] ||
+        lastRenderedLfoOutWave[i] != settings.lfoOutWave[i] ||
+        lastRenderedLfoOutLoRate[i] != settings.lfoOutLoRate[i] ||
+        lastRenderedLfoOutFmRate[i] != settings.lfoOutFmRate[i] ||
+        lastRenderedLfoOutDepthPercent[i] != settings.lfoOutDepthPercent[i] ||
+        lastRenderedLfoOutPolarity[i] != settings.lfoOutPolarity[i] ||
+        lastRenderedLfoOutPulseWidth[i] != settings.lfoOutPulseWidth[i] ||
+        lastRenderedLfoOutOffsetPercent[i] != settings.lfoOutOffsetPercent[i]) {
+      return false;
+    }
+  }
+  return lastRenderedLfoPulseWidth == settings.lfoPulseWidth &&
+         lastRenderedLfo2Link == settings.lfo2Link &&
+         lastRenderedLfo2PhaseOffset == settings.lfo2PhaseOffset &&
+         lastRenderedClockSource == settings.clockSource;
+}
+
+void rememberLfoOutRenderState() {
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    lastRenderedLfoOutMode[i] = settings.lfoOutMode[i];
+    lastRenderedLfoOutWave[i] = settings.lfoOutWave[i];
+    lastRenderedLfoOutLoRate[i] = settings.lfoOutLoRate[i];
+    lastRenderedLfoOutFmRate[i] = settings.lfoOutFmRate[i];
+    lastRenderedLfoOutDepthPercent[i] = settings.lfoOutDepthPercent[i];
+    lastRenderedLfoOutPolarity[i] = settings.lfoOutPolarity[i];
+    lastRenderedLfoOutPulseWidth[i] = settings.lfoOutPulseWidth[i];
+    lastRenderedLfoOutOffsetPercent[i] = settings.lfoOutOffsetPercent[i];
+  }
+  lastRenderedLfoPulseWidth = settings.lfoPulseWidth;
+  lastRenderedLfo2Link = settings.lfo2Link;
+  lastRenderedLfo2PhaseOffset = settings.lfo2PhaseOffset;
+  lastRenderedClockSource = settings.clockSource;
 }
 
 void renderDisplay() {
@@ -1006,11 +1672,13 @@ void renderDisplay() {
         lastRenderedMenuEditValue == menuEditValue &&
         lastRenderedCurveMode == settings.curveMode &&
         lastRenderedBendDirection == settings.bendDirection &&
+        lastRenderedOutputFocus == currentOutputFocus() &&
         lastRenderedOutputMode == settings.outputMode &&
         lastRenderedLfoWave == settings.lfoWave &&
         lastRenderedLfoLoRate == settings.lfoLoRate &&
         lastRenderedLfoFmRate == settings.lfoFmRate &&
         lastRenderedLfoDepthPercent == settings.lfoDepthPercent &&
+        lfoOutRenderStateUnchanged() &&
         lastRenderedSettingsDirty == settingsDirty) {
       return;
     }
@@ -1022,7 +1690,11 @@ void renderDisplay() {
       drawText3x5(0, 27, "TURN PRESS OK", 1);
     } else {
       char line[24];
-      snprintf(line, sizeof(line), "MENU %u/%u", static_cast<unsigned>(menuIndex + 1), MENU_COUNT);
+      snprintf(line,
+               sizeof(line),
+               "MENU %u/%u",
+               static_cast<unsigned>(visibleMenuItemPosition(menuIndex)),
+               static_cast<unsigned>(visibleMenuItemCount()));
       drawText3x5(0, 0, line, 1);
       drawText3x5(0, 10, menuItemTitle(menuIndex), 2);
       drawText3x5(70, 10, menuItemValue(menuIndex), 2);
@@ -1037,11 +1709,13 @@ void renderDisplay() {
     lastRenderedMenuEditValue = menuEditValue;
     lastRenderedCurveMode = settings.curveMode;
     lastRenderedBendDirection = settings.bendDirection;
+    lastRenderedOutputFocus = currentOutputFocus();
     lastRenderedOutputMode = settings.outputMode;
     lastRenderedLfoWave = settings.lfoWave;
     lastRenderedLfoLoRate = settings.lfoLoRate;
     lastRenderedLfoFmRate = settings.lfoFmRate;
     lastRenderedLfoDepthPercent = settings.lfoDepthPercent;
+    rememberLfoOutRenderState();
     lastRenderedSettingsDirty = settingsDirty;
     return;
   }
@@ -1060,7 +1734,9 @@ void renderDisplay() {
   }
 
   char label[8];
-  if (cvOverrideEnabled) {
+  if (outputFocusIsLfoOut()) {
+    snprintf(label, sizeof(label), "%s", currentOutputFocusLabel());
+  } else if (cvOverrideEnabled) {
     snprintf(label, sizeof(label), "CV");
   } else if (outputModeIsLfo()) {
     snprintf(label, sizeof(label), "%s", outputModeDisplayLabel());
@@ -1079,11 +1755,13 @@ void renderDisplay() {
       lastRenderedCvOverrideMv == cvOverrideMv &&
       lastRenderedCurveMode == settings.curveMode &&
       lastRenderedBendDirection == settings.bendDirection &&
+      lastRenderedOutputFocus == currentOutputFocus() &&
       lastRenderedOutputMode == settings.outputMode &&
       lastRenderedLfoWave == settings.lfoWave &&
       lastRenderedLfoLoRate == settings.lfoLoRate &&
       lastRenderedLfoFmRate == settings.lfoFmRate &&
-      lastRenderedLfoDepthPercent == settings.lfoDepthPercent) {
+      lastRenderedLfoDepthPercent == settings.lfoDepthPercent &&
+      lfoOutRenderStateUnchanged()) {
     return;
   }
 
@@ -1091,7 +1769,17 @@ void renderDisplay() {
   drawText3x5(0, 0, label, 4);
 
   char line[24];
-  if (cvOverrideEnabled) {
+  if (outputFocusIsLfoOut()) {
+    if (currentLfoOutIndex() == 1 && lfo2Linked()) {
+      snprintf(line, sizeof(line), "LNK %s %s",
+               lfoLinkDisplayLabel(settings.lfo2Link),
+               lfoPhaseOffsetDisplayLabel(settings.lfo2PhaseOffset));
+    } else {
+      char rate[16];
+      formatLfoRate(rate, sizeof(rate), lfoOutRateHz(currentLfoOutIndex()));
+      snprintf(line, sizeof(line), "SPD %s", rate);
+    }
+  } else if (cvOverrideEnabled) {
     snprintf(line, sizeof(line), "SET %uMV", cvOverrideMv);
   } else if (outputModeIsLfo()) {
     snprintf(line, sizeof(line), "SPD PED");
@@ -1101,7 +1789,14 @@ void renderDisplay() {
   }
   drawText3x5(70, 1, line, 1);
 
-  if (cvOverrideEnabled) {
+  if (outputFocusIsLfoOut()) {
+    int8_t ofs = settings.lfoOutOffsetPercent[currentLfoOutIndex()];
+    if (ofs != 0) {
+      snprintf(line, sizeof(line), "D%u O%+d", currentFocusedLfoDepthPercent(), ofs);
+    } else {
+      snprintf(line, sizeof(line), "DEP %u%%", currentFocusedLfoDepthPercent());
+    }
+  } else if (cvOverrideEnabled) {
     snprintf(line, sizeof(line), "FIXED");
   } else if (outputModeIsLfo()) {
     snprintf(line, sizeof(line), "DEP %u%%", settings.lfoDepthPercent);
@@ -1114,7 +1809,13 @@ void renderDisplay() {
   }
   drawText3x5(70, 10, line, 1);
 
-  if (outputModeIsLfo()) {
+  if (outputFocusIsLfoOut()) {
+    snprintf(line,
+             sizeof(line),
+             "%s %s",
+             currentFocusedLfoWaveDisplayLabel(),
+             polarityLabel(settings.lfoOutPolarity[currentLfoOutIndex()]));
+  } else if (outputModeIsLfo()) {
     snprintf(line,
              sizeof(line),
              "%s %s",
@@ -1131,6 +1832,9 @@ void renderDisplay() {
     drawText3x5(0, 27, "CV HOLD", 1);
   } else if (tuneMode) {
     drawText3x5(0, 27, "TUNE", 1);
+  } else if (outputFocusIsLfoOut()) {
+    snprintf(line, sizeof(line), "%s %s", currentOutputFocusLabel(), settingsDirty ? "DIRTY" : "SAVED");
+    drawText3x5(0, 27, line, 1);
   } else if (outputModeIsLfo()) {
     snprintf(line, sizeof(line), "LFO %s", settingsDirty ? "DIRTY" : "SAVED");
     drawText3x5(0, 27, line, 1);
@@ -1156,11 +1860,13 @@ void renderDisplay() {
   lastRenderedCvOverrideMv = cvOverrideMv;
   lastRenderedCurveMode = settings.curveMode;
   lastRenderedBendDirection = settings.bendDirection;
+  lastRenderedOutputFocus = currentOutputFocus();
   lastRenderedOutputMode = settings.outputMode;
   lastRenderedLfoWave = settings.lfoWave;
   lastRenderedLfoLoRate = settings.lfoLoRate;
   lastRenderedLfoFmRate = settings.lfoFmRate;
   lastRenderedLfoDepthPercent = settings.lfoDepthPercent;
+  rememberLfoOutRenderState();
 }
 
 void renderDisplayNow() {
@@ -1189,8 +1895,12 @@ void printStatus() {
   Serial.print(label);
   Serial.print(F(" semis="));
   Serial.print(settings.semitones);
-  Serial.print(F(" outMv="));
+  Serial.print(F(" focus="));
+  Serial.print(currentOutputFocusLabel());
+  Serial.print(F(" expMv="));
   Serial.print(currentOutputMicrovolts / 1000.0f, 3);
+  Serial.print(F(" expCode="));
+  Serial.print(currentDacCode);
   Serial.print(F(" mode="));
   Serial.print(outputModeLabel());
   Serial.print(F(" dir="));
@@ -1229,8 +1939,39 @@ void printStatus() {
   } else {
     Serial.print(F("off"));
   }
-  Serial.print(F(" dacCode="));
-  Serial.print(currentDacCode);
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    Serial.print(F(" lfo"));
+    Serial.print(i + 1);
+    Serial.print(F("Mv="));
+    Serial.print(lfoOutOutputMicrovolts[i] / 1000.0f, 3);
+    Serial.print(F(" code="));
+    Serial.print(lfoOutDacCode[i]);
+    Serial.print(F(" mode="));
+    Serial.print(picoOutputModeName(settings.lfoOutMode[i]));
+    Serial.print(F(" wave="));
+    Serial.print(picoLfoWaveName(settings.lfoOutWave[i]));
+    Serial.print(F(" rateHz="));
+    Serial.print(lfoOutRateHz(i), 3);
+    Serial.print(F(" depth="));
+    Serial.print(settings.lfoOutDepthPercent[i]);
+    Serial.print(F("%"));
+    Serial.print(F(" pol="));
+    Serial.print(polarityLabel(settings.lfoOutPolarity[i]));
+    Serial.print(F(" pw="));
+    Serial.print(settings.lfoOutPulseWidth[i]);
+    Serial.print(F("%"));
+    Serial.print(F(" ofs="));
+    Serial.print(settings.lfoOutOffsetPercent[i]);
+    Serial.print(F("%"));
+  }
+  Serial.print(F(" link="));
+  Serial.print(picoLfoLinkName(settings.lfo2Link));
+  Serial.print(F(" linkPhase="));
+  Serial.print(picoLfoPhaseOffsetDegrees(settings.lfo2PhaseOffset));
+  Serial.print(F(" clock="));
+  Serial.print(picoClockSourceName(settings.clockSource));
+  Serial.print(F(" clockCode="));
+  Serial.print(clockDacCode);
   Serial.print(F(" dac="));
   Serial.print(dacReady ? F("ready") : F("missing"));
   Serial.print(F(" oled="));
@@ -1308,16 +2049,58 @@ void setCurveMode(uint8_t mode, bool persist) {
 
 void resetLfoPhase() {
   lfoPhase = 0.0f;
+  lfoCycle = 0;
   lastLfoUs = 0;
   refreshControlNow();
   renderDisplayNow();
   Serial.println(F("OK LFO phase reset"));
 }
 
+void resetLfoOutPhase(uint8_t index) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  lfoOutPhase[safeIndex] = 0.0f;
+  lfoOutCycle[safeIndex] = 0;
+  lastLfoOutUs[safeIndex] = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK "));
+  Serial.print(outputFocusLabel(static_cast<uint8_t>(OUTPUT_FOCUS_LFO1 + safeIndex)));
+  Serial.println(F(" phase reset"));
+}
+
+void resetFocusedLfoPhase() {
+  if (outputFocusIsLfoOut()) {
+    resetLfoOutPhase(currentLfoOutIndex());
+  } else {
+    resetLfoPhase();
+  }
+}
+
+void setOutputFocus(uint8_t focus, bool persist) {
+  settings.outputFocus = static_cast<uint8_t>(
+      clampValue<int>(focus, OUTPUT_FOCUS_EXP, OUTPUT_FOCUS_COUNT - 1));
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  forceDisplayUpdate();
+  renderDisplayNow();
+  Serial.print(F("OK focus "));
+  Serial.println(currentOutputFocusLabel());
+}
+
+void cycleOutputFocus() {
+  setOutputFocus(static_cast<uint8_t>((currentOutputFocus() + 1) % OUTPUT_FOCUS_COUNT), true);
+  saveSettings();
+  setDisplayMessage(currentOutputFocusLabel(), "EDIT TARGET", CAL_MESSAGE_MS);
+  renderDisplayNow();
+}
+
 void setOutputMode(uint8_t mode, bool persist) {
   settings.outputMode = clampPicoOutputMode(mode);
   tuneMode = false;
   lfoPhase = 0.0f;
+  lfoCycle = 0;
   lastLfoUs = 0;
   if (persist) {
     markSettingsDirty();
@@ -1329,9 +2112,36 @@ void setOutputMode(uint8_t mode, bool persist) {
   Serial.println(outputModeLabel());
 }
 
+void setLfoOutMode(uint8_t index, uint8_t mode, bool persist) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  settings.lfoOutMode[safeIndex] = clampPicoLfoOutputMode(mode);
+  lfoOutPhase[safeIndex] = 0.0f;
+  lfoOutCycle[safeIndex] = 0;
+  lastLfoOutUs[safeIndex] = 0;
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK "));
+  Serial.print(outputFocusLabel(static_cast<uint8_t>(OUTPUT_FOCUS_LFO1 + safeIndex)));
+  Serial.print(F(" mode "));
+  Serial.println(picoOutputModeName(settings.lfoOutMode[safeIndex]));
+}
+
+void setFocusedOutputMode(uint8_t mode, bool persist) {
+  if (outputFocusIsLfoOut()) {
+    setLfoOutMode(currentLfoOutIndex(), mode, persist);
+  } else {
+    setOutputMode(mode, persist);
+  }
+}
+
 void setLfoWave(uint8_t wave, bool persist) {
   settings.lfoWave = clampPicoLfoWave(wave);
   lfoPhase = 0.0f;
+  lfoCycle = 0;
   lastLfoUs = 0;
   if (persist) {
     markSettingsDirty();
@@ -1341,6 +2151,32 @@ void setLfoWave(uint8_t wave, bool persist) {
   renderDisplayNow();
   Serial.print(F("OK wave "));
   Serial.println(lfoWaveLabel());
+}
+
+void setLfoOutWave(uint8_t index, uint8_t wave, bool persist) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  settings.lfoOutWave[safeIndex] = clampPicoLfoWave(wave);
+  lfoOutPhase[safeIndex] = 0.0f;
+  lfoOutCycle[safeIndex] = 0;
+  lastLfoOutUs[safeIndex] = 0;
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK "));
+  Serial.print(outputFocusLabel(static_cast<uint8_t>(OUTPUT_FOCUS_LFO1 + safeIndex)));
+  Serial.print(F(" wave "));
+  Serial.println(picoLfoWaveName(settings.lfoOutWave[safeIndex]));
+}
+
+void setFocusedLfoWave(uint8_t wave, bool persist) {
+  if (outputFocusIsLfoOut()) {
+    setLfoOutWave(currentLfoOutIndex(), wave, persist);
+  } else {
+    setLfoWave(wave, persist);
+  }
 }
 
 void setCurrentLfoRateStep(int step, bool persist) {
@@ -1368,6 +2204,49 @@ void setCurrentLfoRateHz(float hz, bool persist) {
   setCurrentLfoRateStep(nearestPicoLfoRateStep(settings.outputMode, hz), persist);
 }
 
+void setLfoOutRateStep(uint8_t index, int step, bool persist) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  if (settings.lfoOutMode[safeIndex] == kPicoOutputLfoFm) {
+    settings.lfoOutFmRate[safeIndex] =
+        clampPicoLfoRateStep(step, settings.lfoOutMode[safeIndex]);
+  } else {
+    settings.lfoOutLoRate[safeIndex] =
+        clampPicoLfoRateStep(step, settings.lfoOutMode[safeIndex]);
+  }
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+
+  char rate[16];
+  formatLfoRate(rate, sizeof(rate), lfoOutRateHz(safeIndex));
+  Serial.print(F("OK "));
+  Serial.print(outputFocusLabel(static_cast<uint8_t>(OUTPUT_FOCUS_LFO1 + safeIndex)));
+  Serial.print(F(" rate "));
+  Serial.print(rate);
+  Serial.print(F(" step="));
+  Serial.println(lfoOutRateStep(safeIndex));
+}
+
+void setFocusedLfoRateStep(int step, bool persist) {
+  if (outputFocusIsLfoOut()) {
+    setLfoOutRateStep(currentLfoOutIndex(), step, persist);
+  } else {
+    setCurrentLfoRateStep(step, persist);
+  }
+}
+
+void setFocusedLfoRateHz(float hz, bool persist) {
+  if (outputFocusIsLfoOut()) {
+    uint8_t index = currentLfoOutIndex();
+    setLfoOutRateStep(index, nearestPicoLfoRateStep(settings.lfoOutMode[index], hz), persist);
+  } else {
+    setCurrentLfoRateHz(hz, persist);
+  }
+}
+
 void setLfoDepthPercent(int value, bool persist) {
   settings.lfoDepthPercent = clampPicoLfoDepthPercent(value);
   if (persist) {
@@ -1379,6 +2258,119 @@ void setLfoDepthPercent(int value, bool persist) {
   Serial.print(F("OK depth "));
   Serial.print(settings.lfoDepthPercent);
   Serial.println(F("%"));
+}
+
+void setLfoOutDepthPercent(uint8_t index, int value, bool persist) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  settings.lfoOutDepthPercent[safeIndex] = clampPicoLfoDepthPercent(value);
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK "));
+  Serial.print(outputFocusLabel(static_cast<uint8_t>(OUTPUT_FOCUS_LFO1 + safeIndex)));
+  Serial.print(F(" depth "));
+  Serial.print(settings.lfoOutDepthPercent[safeIndex]);
+  Serial.println(F("%"));
+}
+
+void setFocusedLfoDepthPercent(int value, bool persist) {
+  if (outputFocusIsLfoOut()) {
+    setLfoOutDepthPercent(currentLfoOutIndex(), value, persist);
+  } else {
+    setLfoDepthPercent(value, persist);
+  }
+}
+
+void setFocusedLfoPulseWidth(int value, bool persist) {
+  uint8_t clamped = clampPicoLfoPulseWidth(value);
+  if (outputFocusIsLfoOut()) {
+    settings.lfoOutPulseWidth[currentLfoOutIndex()] = clamped;
+  } else {
+    settings.lfoPulseWidth = clamped;
+  }
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK "));
+  Serial.print(currentOutputFocusLabel());
+  Serial.print(F(" pw "));
+  Serial.print(clamped);
+  Serial.println(F("%"));
+}
+
+void setLfoOutOffsetPercent(uint8_t index, int value, bool persist) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  settings.lfoOutOffsetPercent[safeIndex] = clampPicoLfoOffsetPercent(value);
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK "));
+  Serial.print(outputFocusLabel(static_cast<uint8_t>(OUTPUT_FOCUS_LFO1 + safeIndex)));
+  Serial.print(F(" offset "));
+  if (settings.lfoOutOffsetPercent[safeIndex] >= 0) {
+    Serial.print(F("+"));
+  }
+  Serial.print(settings.lfoOutOffsetPercent[safeIndex]);
+  Serial.println(F("%"));
+}
+
+void setLfo2Link(uint8_t link, bool persist) {
+  settings.lfo2Link = clampPicoLfoLink(link);
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK LFO2 link "));
+  Serial.println(picoLfoLinkName(settings.lfo2Link));
+}
+
+void setLfo2PhaseOffset(uint8_t phaseOffset, bool persist) {
+  settings.lfo2PhaseOffset = clampPicoLfoPhaseOffset(phaseOffset);
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK LFO2 link phase "));
+  Serial.println(picoLfoPhaseOffsetDegrees(settings.lfo2PhaseOffset));
+}
+
+void setClockSource(uint8_t source, bool persist) {
+  settings.clockSource = clampPicoClockSource(source);
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK clock "));
+  Serial.println(picoClockSourceName(settings.clockSource));
+}
+
+void resetAllLfoPhases() {
+  lfoPhase = 0.0f;
+  lfoCycle = 0;
+  lastLfoUs = 0;
+  for (uint8_t i = 0; i < LFO_OUT_COUNT; ++i) {
+    lfoOutPhase[i] = 0.0f;
+    lfoOutCycle[i] = 0;
+    lastLfoOutUs[i] = 0;
+  }
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.println(F("OK all LFO phases reset"));
 }
 
 bool parseOutputMode(const char* value, uint8_t* out) {
@@ -1398,6 +2390,28 @@ bool parseOutputMode(const char* value, uint8_t* out) {
   if (strcmp(value, "fm") == 0 || strcmp(value, "fast") == 0 ||
       strcmp(value, "audio") == 0 || strcmp(value, "lfofm") == 0) {
     *out = kPicoOutputLfoFm;
+    return true;
+  }
+  return false;
+}
+
+bool parseOutputFocus(const char* value, uint8_t* out) {
+  if (value == nullptr || out == nullptr) {
+    return false;
+  }
+  if (strcmp(value, "exp") == 0 || strcmp(value, "expr") == 0 ||
+      strcmp(value, "ped") == 0 || strcmp(value, "pedal") == 0) {
+    *out = OUTPUT_FOCUS_EXP;
+    return true;
+  }
+  if (strcmp(value, "lfo1") == 0 || strcmp(value, "l1") == 0 ||
+      strcmp(value, "aux1") == 0) {
+    *out = OUTPUT_FOCUS_LFO1;
+    return true;
+  }
+  if (strcmp(value, "lfo2") == 0 || strcmp(value, "l2") == 0 ||
+      strcmp(value, "aux2") == 0) {
+    *out = OUTPUT_FOCUS_LFO2;
     return true;
   }
   return false;
@@ -1435,6 +2449,16 @@ bool parseLfoWave(const char* value, uint8_t* out) {
     *out = kPicoLfoPulse;
     return true;
   }
+  if (strcmp(value, "sh") == 0 || strcmp(value, "samplehold") == 0 ||
+      strcmp(value, "random") == 0 || strcmp(value, "rand") == 0) {
+    *out = kPicoLfoSampleHold;
+    return true;
+  }
+  if (strcmp(value, "drift") == 0 || strcmp(value, "wander") == 0 ||
+      strcmp(value, "smoothrandom") == 0) {
+    *out = kPicoLfoDrift;
+    return true;
+  }
   return false;
 }
 
@@ -1468,6 +2492,40 @@ void toggleBendDirection() {
   saveSettings();
   setDisplayMessage(directionLabel(), outputModeIsLfo() ? "POLARITY" : "DIRECTION", CAL_MESSAGE_MS);
   renderDisplayNow();
+}
+
+void setLfoOutPolarity(uint8_t index, uint8_t polarity, bool persist) {
+  uint8_t safeIndex = index < LFO_OUT_COUNT ? index : 0;
+  settings.lfoOutPolarity[safeIndex] =
+      polarity == static_cast<uint8_t>(kPicoBendDown) ? static_cast<uint8_t>(kPicoBendDown)
+                                                      : static_cast<uint8_t>(kPicoBendUp);
+  if (persist) {
+    markSettingsDirty();
+  }
+  displayMessageUntilMs = 0;
+  refreshControlNow();
+  renderDisplayNow();
+  Serial.print(F("OK "));
+  Serial.print(outputFocusLabel(static_cast<uint8_t>(OUTPUT_FOCUS_LFO1 + safeIndex)));
+  Serial.print(F(" polarity "));
+  Serial.println(polarityLabel(settings.lfoOutPolarity[safeIndex]));
+}
+
+void toggleFocusedPolarityOrDirection() {
+  if (outputFocusIsLfoOut()) {
+    uint8_t index = currentLfoOutIndex();
+    setLfoOutPolarity(index,
+                      settings.lfoOutPolarity[index] == static_cast<uint8_t>(kPicoBendDown)
+                          ? static_cast<uint8_t>(kPicoBendUp)
+                          : static_cast<uint8_t>(kPicoBendDown),
+                      true);
+    saveSettings();
+    return;
+  }
+
+  setBendDirection(currentBendDirection() == kPicoBendDown ? kPicoBendUp : kPicoBendDown,
+                   true);
+  saveSettings();
 }
 
 void setOctaveMillivolts(int value) {
@@ -1713,7 +2771,7 @@ void resetCalibration() {
 void openMenu() {
   pendingShortPress = false;
   menuActive = true;
-  menuIndex = MENU_MODE;
+  menuIndex = MENU_OUT;
   menuEditField = MENU_EDIT_NONE;
   displayMessageUntilMs = 0;
   forceDisplayUpdate();
@@ -1767,16 +2825,40 @@ void commitMenuEdit() {
   uint8_t field = menuEditField;
   uint8_t value = menuEditValue;
   switch (field) {
+    case MENU_EDIT_OUT:
+      setOutputFocus(value, true);
+      saveSettings();
+      break;
     case MENU_EDIT_MODE:
-      setOutputMode(value, true);
+      setFocusedOutputMode(outputFocusIsLfoOut() ? lfoModeEditValueToMode(value) : value, true);
       saveSettings();
       break;
     case MENU_EDIT_WAVE:
-      setLfoWave(value, true);
+      setFocusedLfoWave(value, true);
       saveSettings();
       break;
     case MENU_EDIT_DEPTH:
-      setLfoDepthPercent(picoLfoDepthPercentFromIndex(value), true);
+      setFocusedLfoDepthPercent(picoLfoDepthPercentFromIndex(value), true);
+      saveSettings();
+      break;
+    case MENU_EDIT_PW:
+      setFocusedLfoPulseWidth(picoLfoPulseWidthPercentFromIndex(value), true);
+      saveSettings();
+      break;
+    case MENU_EDIT_OFS:
+      setLfoOutOffsetPercent(currentLfoOutIndex(), picoLfoOffsetPercentFromIndex(value), true);
+      saveSettings();
+      break;
+    case MENU_EDIT_LINK:
+      setLfo2Link(value, true);
+      saveSettings();
+      break;
+    case MENU_EDIT_PHS:
+      setLfo2PhaseOffset(value, true);
+      saveSettings();
+      break;
+    case MENU_EDIT_CLK:
+      setClockSource(value, true);
       saveSettings();
       break;
     case MENU_EDIT_CURVE:
@@ -1796,7 +2878,12 @@ void moveMenu(int direction) {
     moveMenuEdit(direction);
     return;
   }
-  menuIndex = wrapMenuChoice(static_cast<int>(menuIndex) + direction, MENU_COUNT);
+  for (uint8_t attempts = 0; attempts < MENU_COUNT; ++attempts) {
+    menuIndex = wrapMenuChoice(static_cast<int>(menuIndex) + direction, MENU_COUNT);
+    if (menuItemVisible(menuIndex)) {
+      break;
+    }
+  }
   forceDisplayUpdate();
   renderDisplayNow();
   Serial.print(F("OK menu "));
@@ -1810,6 +2897,9 @@ void selectMenuItem() {
   }
 
   switch (menuIndex) {
+    case MENU_OUT:
+      beginMenuEdit(MENU_EDIT_OUT);
+      break;
     case MENU_MODE:
       beginMenuEdit(MENU_EDIT_MODE);
       break;
@@ -1818,6 +2908,21 @@ void selectMenuItem() {
       break;
     case MENU_DEPTH:
       beginMenuEdit(MENU_EDIT_DEPTH);
+      break;
+    case MENU_PW:
+      beginMenuEdit(MENU_EDIT_PW);
+      break;
+    case MENU_OFS:
+      beginMenuEdit(MENU_EDIT_OFS);
+      break;
+    case MENU_LINK:
+      beginMenuEdit(MENU_EDIT_LINK);
+      break;
+    case MENU_PHS:
+      beginMenuEdit(MENU_EDIT_PHS);
+      break;
+    case MENU_CLK:
+      beginMenuEdit(MENU_EDIT_CLK);
       break;
     case MENU_CURVE:
       beginMenuEdit(MENU_EDIT_CURVE);
@@ -1829,9 +2934,7 @@ void selectMenuItem() {
       startCalibration();
       break;
     case MENU_DIR:
-      setBendDirection(currentBendDirection() == kPicoBendDown ? kPicoBendUp : kPicoBendDown,
-                       true);
-      saveSettings();
+      toggleFocusedPolarityOrDirection();
       forceDisplayUpdate();
       renderDisplayNow();
       break;
@@ -1842,10 +2945,38 @@ void selectMenuItem() {
   }
 }
 
+// Tap tempo: two single presses on a focused LFO both sync the phase and, when
+// the gap lands inside the tap window, set the rate to the tapped interval.
+bool applyTapTempo() {
+  uint32_t now = millis();
+  uint32_t delta = now - lastTapMs;
+  bool tapped = lastTapMs != 0 && lastTapFocus == currentOutputFocus() &&
+                delta >= TAP_MIN_MS && delta <= TAP_MAX_MS;
+  lastTapMs = now;
+  lastTapFocus = currentOutputFocus();
+  if (!tapped) {
+    return false;
+  }
+  if (currentOutputFocus() == OUTPUT_FOCUS_LFO2 && lfo2Linked()) {
+    Serial.println(F("LFO2 linked to LFO1; tap ignored until link off"));
+    return false;
+  }
+  setFocusedLfoRateHz(1000.0f / static_cast<float>(delta), true);
+  return true;
+}
+
 void performSingleShortPress() {
+  if (outputFocusIsLfoOut()) {
+    bool tapped = applyTapTempo();
+    resetLfoOutPhase(currentLfoOutIndex());
+    setDisplayMessage(tapped ? "TAP" : "SYNC", currentOutputFocusLabel(), CAL_MESSAGE_MS);
+    renderDisplayNow();
+    return;
+  }
   if (outputModeIsLfo()) {
+    bool tapped = applyTapTempo();
     resetLfoPhase();
-    setDisplayMessage("SYNC", "LFO PHASE", CAL_MESSAGE_MS);
+    setDisplayMessage(tapped ? "TAP" : "SYNC", "LFO PHASE", CAL_MESSAGE_MS);
     renderDisplayNow();
     return;
   }
@@ -1886,7 +3017,7 @@ void handleShortPress() {
   uint32_t now = millis();
   if (pendingShortPress && now - pendingShortPressMs <= BUTTON_DOUBLE_CLICK_MS) {
     pendingShortPress = false;
-    toggleBendDirection();
+    cycleOutputFocus();
     return;
   }
 
@@ -1974,6 +3105,22 @@ void handleEncoderStep(int direction) {
   if (tuneMode) {
     int voltageDirection = currentBendDirection() == kPicoBendDown ? -direction : direction;
     nudgeToeMapMillivolts(voltageDirection * static_cast<int>(tuneStepMv));
+    return;
+  }
+
+  if (outputFocusIsLfoOut()) {
+    if (currentLfoOutIndex() == 1 && lfo2Linked()) {
+      // Linked LFO2 ignores its own rate; the encoder walks the phase offset.
+      setLfo2PhaseOffset(
+          static_cast<uint8_t>((settings.lfo2PhaseOffset + kPicoLfoPhaseOffsetCount +
+                                (direction > 0 ? 1 : kPicoLfoPhaseOffsetCount - 1)) %
+                               kPicoLfoPhaseOffsetCount),
+          true);
+      return;
+    }
+    setLfoOutRateStep(currentLfoOutIndex(),
+                      static_cast<int>(lfoOutRateStep(currentLfoOutIndex())) + direction,
+                      true);
     return;
   }
 
@@ -2135,6 +3282,19 @@ void pollSerialCommand(char* line) {
 	    } else {
 	      Serial.println(F("ERR direction up|down|toggle"));
 	    }
+  } else if (strcmp(command, "pol") == 0 || strcmp(command, "polarity") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    if (!outputFocusIsLfoOut()) {
+      Serial.println(F("ERR polarity applies after focus lfo1|lfo2; use direction for EXP"));
+    } else if (arg != nullptr && strcmp(arg, "up") == 0) {
+      setLfoOutPolarity(currentLfoOutIndex(), static_cast<uint8_t>(kPicoBendUp), true);
+    } else if (arg != nullptr && (strcmp(arg, "down") == 0 || strcmp(arg, "dn") == 0)) {
+      setLfoOutPolarity(currentLfoOutIndex(), static_cast<uint8_t>(kPicoBendDown), true);
+    } else if (arg != nullptr && strcmp(arg, "toggle") == 0) {
+      toggleFocusedPolarityOrDirection();
+    } else {
+      Serial.println(F("ERR polarity up|down|toggle"));
+    }
 	  } else if (strcmp(command, "more") == 0 || strcmp(command, "inc") == 0) {
 	    setIntervalMagnitude(static_cast<int>(currentIntervalMagnitude()) + 1, true);
 	  } else if (strcmp(command, "less") == 0 || strcmp(command, "dec") == 0) {
@@ -2153,47 +3313,133 @@ void pollSerialCommand(char* line) {
 	    } else {
 	      setOctaveMillivolts(atoi(arg));
 	    }
+  } else if (strcmp(command, "focus") == 0 || strcmp(command, "out") == 0 ||
+             strcmp(command, "target") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    uint8_t focus = 0;
+    if (parseOutputFocus(arg, &focus)) {
+      setOutputFocus(focus, true);
+    } else if (arg != nullptr && strcmp(arg, "next") == 0) {
+      cycleOutputFocus();
+    } else {
+      Serial.println(F("ERR focus exp|lfo1|lfo2|next"));
+    }
   } else if (strcmp(command, "mode") == 0 || strcmp(command, "output") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
     uint8_t mode = 0;
     if (parseOutputMode(arg, &mode)) {
-      setOutputMode(mode, true);
+      if (outputFocusIsLfoOut() && mode == kPicoOutputPedal) {
+        Serial.println(F("ERR LFO outputs support mode lo|fm"));
+      } else {
+        setFocusedOutputMode(mode, true);
+      }
     } else {
-      Serial.println(F("ERR mode ped|lo|fm"));
+      Serial.println(outputFocusIsLfoOut() ? F("ERR mode lo|fm") : F("ERR mode ped|lo|fm"));
     }
   } else if (strcmp(command, "wave") == 0 || strcmp(command, "lfo") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
     uint8_t wave = 0;
     if (parseLfoWave(arg, &wave)) {
-      setLfoWave(wave, true);
+      setFocusedLfoWave(wave, true);
     } else {
-      Serial.println(F("ERR wave sine|tri|sawup|sawdown|square|pulse"));
+      Serial.println(F("ERR wave sine|tri|sawup|sawdown|square|pulse|sh|drift"));
     }
   } else if (strcmp(command, "rate") == 0 || strcmp(command, "speed") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
     if (arg == nullptr) {
       Serial.println(F("ERR rate <hz>|step <n>"));
-    } else if (!outputModeIsLfo()) {
-      Serial.println(F("ERR rate only applies in mode lo|fm"));
+    } else if (outputFocusIsExp() && !outputModeIsLfo()) {
+      Serial.println(F("ERR rate only applies to EXP in mode lo|fm; use focus lfo1 or focus lfo2 for dedicated LFOs"));
     } else if (strcmp(arg, "step") == 0) {
       char* value = strtok(nullptr, " \t\r\n");
       if (value == nullptr) {
         Serial.println(F("ERR rate step <n>"));
       } else {
-        setCurrentLfoRateStep(atoi(value), true);
+        setFocusedLfoRateStep(atoi(value), true);
       }
     } else {
-      setCurrentLfoRateHz(atof(arg), true);
+      setFocusedLfoRateHz(atof(arg), true);
     }
   } else if (strcmp(command, "sync") == 0 || strcmp(command, "phase") == 0) {
-    resetLfoPhase();
+    char* arg = strtok(nullptr, " \t\r\n");
+    if (arg != nullptr && strcmp(arg, "all") == 0) {
+      resetAllLfoPhases();
+    } else {
+      resetFocusedLfoPhase();
+    }
+  } else if (strcmp(command, "tap") == 0) {
+    if (outputFocusIsExp() && !outputModeIsLfo()) {
+      Serial.println(F("ERR tap applies to a focused LFO; use focus lfo1|lfo2 or mode lo|fm"));
+    } else if (applyTapTempo()) {
+      resetFocusedLfoPhase();
+    } else {
+      resetFocusedLfoPhase();
+      Serial.println(F("Tap armed; send tap again at the target tempo"));
+    }
   } else if (strcmp(command, "depth") == 0 || strcmp(command, "atten") == 0 ||
              strcmp(command, "level") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
     if (arg == nullptr) {
-      Serial.println(F("ERR depth 50..100"));
+      Serial.println(F("ERR depth 0..100"));
     } else {
-      setLfoDepthPercent(atoi(arg), true);
+      setFocusedLfoDepthPercent(atoi(arg), true);
+    }
+  } else if (strcmp(command, "pw") == 0 || strcmp(command, "pulsewidth") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    if (arg == nullptr) {
+      Serial.println(F("ERR pw 5..95"));
+    } else {
+      setFocusedLfoPulseWidth(atoi(arg), true);
+    }
+  } else if (strcmp(command, "offset") == 0 || strcmp(command, "ofs") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    if (!outputFocusIsLfoOut()) {
+      Serial.println(F("ERR offset applies after focus lfo1|lfo2"));
+    } else if (arg == nullptr) {
+      Serial.println(F("ERR offset -50..50"));
+    } else {
+      setLfoOutOffsetPercent(currentLfoOutIndex(), atoi(arg), true);
+    }
+  } else if (strcmp(command, "link") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    if (arg == nullptr) {
+      Serial.println(F("ERR link off|1:1|1:2|1:4|3:2|2:1|4:1|phase <0|90|180|270>"));
+    } else if (strcmp(arg, "phase") == 0) {
+      char* value = strtok(nullptr, " \t\r\n");
+      int degrees = value != nullptr ? atoi(value) : -1;
+      if (degrees == 0 || degrees == 90 || degrees == 180 || degrees == 270) {
+        setLfo2PhaseOffset(static_cast<uint8_t>(degrees / 90), true);
+      } else {
+        Serial.println(F("ERR link phase 0|90|180|270"));
+      }
+    } else {
+      uint8_t link = 0xff;
+      if (strcmp(arg, "off") == 0) {
+        link = kPicoLfoLinkOff;
+      } else {
+        for (uint8_t candidate = kPicoLfoLink1to1; candidate < kPicoLfoLinkCount; ++candidate) {
+          if (strcmp(arg, picoLfoLinkName(candidate)) == 0) {
+            link = candidate;
+            break;
+          }
+        }
+      }
+      if (link != 0xff) {
+        setLfo2Link(link, true);
+      } else {
+        Serial.println(F("ERR link off|1:1|1:2|1:4|3:2|2:1|4:1|phase <deg>"));
+      }
+    }
+  } else if (strcmp(command, "clock") == 0 || strcmp(command, "clk") == 0) {
+    char* arg = strtok(nullptr, " \t\r\n");
+    if (arg != nullptr && strcmp(arg, "off") == 0) {
+      setClockSource(kPicoClockOff, true);
+    } else if (arg != nullptr && strcmp(arg, "lfo1") == 0) {
+      setClockSource(kPicoClockLfo1, true);
+    } else if (arg != nullptr && strcmp(arg, "lfo2") == 0) {
+      setClockSource(kPicoClockLfo2, true);
+    } else {
+      Serial.println(F("ERR clock off|lfo1|lfo2"));
     }
   } else if (strcmp(command, "response") == 0 || strcmp(command, "resp") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
@@ -2313,11 +3559,26 @@ void pollSerialCommand(char* line) {
   } else if (strcmp(command, "dac") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
     if (arg != nullptr && strcmp(arg, "probe") == 0) {
-      dacReady = probeI2c(MCP4725_ADDRESS);
-      Serial.println(dacReady ? F("MCP4725 PASS at 0x62") : F("MCP4725 FAIL at 0x62"));
-      lastWrittenDacCode = -1;
+      dacReady = probeI2c(MCP4728_ADDRESS);
+      Serial.println(dacReady ? F("MCP4728 PASS at 0x60") : F("MCP4728 FAIL at 0x60"));
+      for (uint8_t channel = 0; channel < DAC_CHANNEL_COUNT; ++channel) {
+        lastWrittenDacCodes[channel] = -1;
+      }
+      refreshControlNow();
+    } else if (arg != nullptr && strcmp(arg, "eeprom") == 0) {
+      if (!dacReady) {
+        Serial.println(F("ERR dac not ready; run dac probe first"));
+      } else if (programMcp4728PowerOnDefaults()) {
+        Serial.println(F("OK MCP4728 power-on EEPROM set to 0V on all channels"));
+        for (uint8_t channel = 0; channel < DAC_CHANNEL_COUNT; ++channel) {
+          lastWrittenDacCodes[channel] = -1;
+        }
+        refreshControlNow();
+      } else {
+        Serial.println(F("ERR MCP4728 EEPROM write failed"));
+      }
     } else {
-      Serial.println(F("ERR dac probe"));
+      Serial.println(F("ERR dac probe|eeprom"));
     }
   } else if (strcmp(command, "display") == 0) {
     char* arg = strtok(nullptr, " \t\r\n");
@@ -2393,12 +3654,23 @@ void printHelp() {
   Serial.println(F("  more|less           change interval size by one semitone"));
   Serial.println(F("  center              set interval to unison"));
   Serial.println(F("  range <mv>          old linear voltage scale, 0..3300; disables response fit"));
-  Serial.println(F("  mode ped|lo|fm      PED interval, LO slow LFO, FM fast LFO"));
-  Serial.println(F("  wave sine|tri|sawup|sawdown|square|pulse"));
-  Serial.println(F("  rate <hz>           set LFO toe/max speed; pedal sweeps min..max"));
-  Serial.println(F("  rate step <n>       set raw LFO toe/max speed step"));
-  Serial.println(F("  depth 50..100       set LFO depth/attenuation in 5% steps"));
-  Serial.println(F("  sync                reset LFO phase"));
+  Serial.println(F("  focus exp|lfo1|lfo2 choose which output encoder/menu/serial edits"));
+  Serial.println(F("  focus next          cycle EXP -> LFO1 -> LFO2"));
+  Serial.println(F("  mode ped|lo|fm      focused EXP: PED interval, LO slow LFO, FM fast LFO"));
+  Serial.println(F("  mode lo|fm          focused LFO1/LFO2: slow or fast dedicated LFO"));
+  Serial.println(F("  wave sine|tri|sawup|sawdown|square|pulse|sh|drift for focused LFO"));
+  Serial.println(F("  rate <hz>           focused EXP LFO toe/max speed or focused LFO fixed speed"));
+  Serial.println(F("  rate step <n>       set raw focused LFO speed step"));
+  Serial.println(F("  depth 0..100        set focused LFO depth/attenuation in 5% steps"));
+  Serial.println(F("  pw 5..95            set focused LFO pulse-wave width"));
+  Serial.println(F("  offset -50..50      shift focused LFO1/LFO2 center voltage"));
+  Serial.println(F("  link off|1:1|1:2|1:4|3:2|2:1|4:1  lock LFO2 rate to LFO1"));
+  Serial.println(F("  link phase 0|90|180|270  linked LFO2 phase offset"));
+  Serial.println(F("  clock off|lfo1|lfo2 full-swing clock square on DAC channel D"));
+  Serial.println(F("  sync                reset focused LFO phase"));
+  Serial.println(F("  sync all            reset every LFO phase together"));
+  Serial.println(F("  tap                 send twice at tempo to set focused LFO rate"));
+  Serial.println(F("  polarity up|down    focused LFO1/LFO2 polarity"));
   Serial.println(F("  response <cents>|off full-scale cents; 3960 = standard 1V/oct, bench default 924"));
   Serial.println(F("  curve linear|easeout|square|smooth"));
   Serial.println(F("  map show|reset      show or rebuild directional toe-voltage map"));
@@ -2412,15 +3684,16 @@ void printHelp() {
   Serial.println(F("  cal heel|toe        capture endpoint from serial"));
   Serial.println(F("  cal reset           reset endpoints to raw 0..4095"));
   Serial.println(F("  invert on|off       reverse pedal travel"));
-  Serial.println(F("  dac probe           retry MCP4725 detection"));
+  Serial.println(F("  dac probe           retry MCP4728 detection"));
+  Serial.println(F("  dac eeprom          program 0V power-on defaults into the MCP4728"));
   Serial.println(F("  display probe       retry OLED detection"));
   Serial.println(F("  enc debug on|off    print rotary encoder A/B transitions"));
   Serial.println(F("  btn debug on|off    print encoder button press timing"));
   Serial.println(F("  menu                open OLED menu"));
   Serial.println(F("  sleep|wake          manual sleep test; auto idle sleep disabled in bench build"));
   Serial.println(F("  save                persist settings"));
-  Serial.println(F("Encoder: PED turn=interval; LO/FM turn=depth; pedal controls LO/FM rate; short=unison/sync/capture; double=UP/DN."));
-  Serial.println(F("Menu: turn=select item, press=choose. MODE/WAVE/DEPTH/CURVE open pickers; turn=value, press=save."));
+  Serial.println(F("Encoder: double=focus EXP/LFO1/LFO2. EXP turn=interval/depth; LFO1/2 turn=speed. Short=unison/sync/capture."));
+  Serial.println(F("Menu: OUT selects focus. WAVE/DEPTH show for LFO modes; CURVE/CAL show for EXP; DIR/POL toggles direction/polarity."));
   Serial.println(F("Tune mode: turn = toe mV trim, short press = save/exit."));
 }
 
@@ -2437,6 +3710,7 @@ void updateControl() {
   }
 
   updateOutputFromPedalState();
+  updateLfoOutStates();
 
   if (!sleeping) {
     writeOutputToDac();
@@ -2477,23 +3751,22 @@ void setup() {
   lastActivityMs = millis();
   pedalState = pedalProcessor.process(currentRaw, 1000.0f);
   updateOutputFromPedalState();
+  updateLfoOutStates();
 
   lastEncoderState = readEncoderState();
   attachInterrupt(digitalPinToInterrupt(ENCODER_A_PIN), handleEncoderInterrupt, CHANGE);
   attachInterrupt(digitalPinToInterrupt(ENCODER_B_PIN), handleEncoderInterrupt, CHANGE);
 
-  dacReady = probeI2c(MCP4725_ADDRESS);
+  dacReady = probeI2c(MCP4728_ADDRESS);
   displayReady = initDisplay();
   if (dacReady) {
-    writeMcp4725(currentDacCode);
-    lastWrittenDacCode = currentDacCode;
-    lastDacWriteUs = micros();
+    writeOutputToDac(true);
   }
 
   Serial.println();
   Serial.println(F("Therevox Expression Controller"));
   Serial.println(F("Board: Raspberry Pi Pico H"));
-  Serial.println(dacReady ? F("MCP4725 PASS at 0x62") : F("MCP4725 FAIL at 0x62"));
+  Serial.println(dacReady ? F("MCP4728 PASS at 0x60") : F("MCP4728 FAIL at 0x60"));
   Serial.println(displayReady ? F("SSD1306 PASS at 0x3C") : F("SSD1306 FAIL at 0x3C"));
   if (!buttonReleasedSinceBoot) {
     Serial.println(F("WARN: encoder switch GP13 reads PRESSED at boot; check switch wiring"));

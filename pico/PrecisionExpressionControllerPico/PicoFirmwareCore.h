@@ -15,7 +15,7 @@ constexpr int8_t kPicoMaxSemitones = 9;
 constexpr uint8_t kPicoSemitoneMapCount =
     static_cast<uint8_t>(kPicoMaxSemitones - kPicoMinSemitones + 1);
 constexpr int32_t kPicoDacFullScaleMicrovolts = 3300000L;
-constexpr uint16_t kMcp4725MaxCode = 4095;
+constexpr uint16_t kMcp4728MaxCode = 4095;
 constexpr int32_t kDefaultCenterMicrovolts = 1500000L;
 constexpr int32_t kDefaultOctaveMicrovolts = 1500000L;
 constexpr int32_t kDefaultUnipolarOctaveMicrovolts = kPicoDacFullScaleMicrovolts;
@@ -28,11 +28,23 @@ constexpr float kPicoLfoLoMinHz = 0.05f;
 constexpr float kPicoLfoLoMaxHz = 20.0f;
 constexpr float kPicoLfoFmMinHz = 8.0f;
 constexpr float kPicoLfoFmMaxHz = 160.0f;
-constexpr uint8_t kPicoLfoMinDepthPercent = 50;
+constexpr uint8_t kPicoLfoMinDepthPercent = 0;
 constexpr uint8_t kPicoLfoMaxDepthPercent = 100;
 constexpr uint8_t kPicoLfoDepthStepPercent = 5;
 constexpr uint8_t kPicoLfoDepthStepCount =
     ((kPicoLfoMaxDepthPercent - kPicoLfoMinDepthPercent) / kPicoLfoDepthStepPercent) + 1;
+constexpr int8_t kPicoLfoMinOffsetPercent = -50;
+constexpr int8_t kPicoLfoMaxOffsetPercent = 50;
+constexpr uint8_t kPicoLfoOffsetStepPercent = 5;
+constexpr uint8_t kPicoLfoOffsetStepCount =
+    ((kPicoLfoMaxOffsetPercent - kPicoLfoMinOffsetPercent) / kPicoLfoOffsetStepPercent) + 1;
+constexpr uint8_t kPicoLfoMinPulseWidthPercent = 5;
+constexpr uint8_t kPicoLfoMaxPulseWidthPercent = 95;
+constexpr uint8_t kPicoLfoPulseWidthStepPercent = 5;
+constexpr uint8_t kPicoLfoPulseWidthStepCount =
+    ((kPicoLfoMaxPulseWidthPercent - kPicoLfoMinPulseWidthPercent) /
+     kPicoLfoPulseWidthStepPercent) + 1;
+constexpr uint8_t kPicoDefaultLfoPulseWidthPercent = 25;
 
 enum PicoBendDirection : uint8_t {
   kPicoBendUp = 0,
@@ -53,7 +65,35 @@ enum PicoLfoWave : uint8_t {
   kPicoLfoSawDown = 3,
   kPicoLfoSquare = 4,
   kPicoLfoPulse = 5,
-  kPicoLfoWaveCount = 6,
+  kPicoLfoSampleHold = 6,
+  kPicoLfoDrift = 7,
+  kPicoLfoWaveCount = 8,
+};
+
+enum PicoLfoLink : uint8_t {
+  kPicoLfoLinkOff = 0,
+  kPicoLfoLink1to1 = 1,
+  kPicoLfoLink1to2 = 2,
+  kPicoLfoLink1to4 = 3,
+  kPicoLfoLink3to2 = 4,
+  kPicoLfoLink2to1 = 5,
+  kPicoLfoLink4to1 = 6,
+  kPicoLfoLinkCount = 7,
+};
+
+enum PicoLfoPhaseOffset : uint8_t {
+  kPicoLfoPhase0 = 0,
+  kPicoLfoPhase90 = 1,
+  kPicoLfoPhase180 = 2,
+  kPicoLfoPhase270 = 3,
+  kPicoLfoPhaseOffsetCount = 4,
+};
+
+enum PicoClockSource : uint8_t {
+  kPicoClockOff = 0,
+  kPicoClockLfo1 = 1,
+  kPicoClockLfo2 = 2,
+  kPicoClockSourceCount = 3,
 };
 
 enum PicoPedalCurve : uint8_t {
@@ -70,6 +110,11 @@ inline uint8_t clampPicoCurveMode(int value) {
 
 inline uint8_t clampPicoOutputMode(int value) {
   return static_cast<uint8_t>(clampValue<int>(value, 0, kPicoOutputModeCount - 1));
+}
+
+inline uint8_t clampPicoLfoOutputMode(int value) {
+  return clampPicoOutputMode(value) == kPicoOutputLfoFm ? kPicoOutputLfoFm
+                                                       : kPicoOutputLfoLo;
 }
 
 inline uint8_t clampPicoLfoWave(int value) {
@@ -101,6 +146,132 @@ inline uint8_t picoLfoDepthPercentFromIndex(int index) {
   return clampPicoLfoDepthPercent(
       kPicoLfoMinDepthPercent + clampValue<int>(index, 0, kPicoLfoDepthStepCount - 1) *
                                     kPicoLfoDepthStepPercent);
+}
+
+inline int8_t clampPicoLfoOffsetPercent(int value) {
+  int step = static_cast<int>(kPicoLfoOffsetStepPercent);
+  int rounded = ((value >= 0 ? value + step / 2 : value - step / 2) / step) * step;
+  return static_cast<int8_t>(
+      clampValue<int>(rounded, kPicoLfoMinOffsetPercent, kPicoLfoMaxOffsetPercent));
+}
+
+inline uint8_t picoLfoOffsetIndexFromPercent(int percent) {
+  int8_t clamped = clampPicoLfoOffsetPercent(percent);
+  return static_cast<uint8_t>((clamped - kPicoLfoMinOffsetPercent) / kPicoLfoOffsetStepPercent);
+}
+
+inline int8_t picoLfoOffsetPercentFromIndex(int index) {
+  return clampPicoLfoOffsetPercent(
+      kPicoLfoMinOffsetPercent + clampValue<int>(index, 0, kPicoLfoOffsetStepCount - 1) *
+                                     kPicoLfoOffsetStepPercent);
+}
+
+inline uint8_t clampPicoLfoPulseWidth(int value) {
+  int step = static_cast<int>(kPicoLfoPulseWidthStepPercent);
+  int rounded = ((value + step / 2) / step) * step;
+  return static_cast<uint8_t>(clampValue<int>(rounded,
+                                              kPicoLfoMinPulseWidthPercent,
+                                              kPicoLfoMaxPulseWidthPercent));
+}
+
+inline uint8_t picoLfoPulseWidthIndexFromPercent(int percent) {
+  uint8_t clamped = clampPicoLfoPulseWidth(percent);
+  return static_cast<uint8_t>((clamped - kPicoLfoMinPulseWidthPercent) /
+                              kPicoLfoPulseWidthStepPercent);
+}
+
+inline uint8_t picoLfoPulseWidthPercentFromIndex(int index) {
+  return clampPicoLfoPulseWidth(
+      kPicoLfoMinPulseWidthPercent +
+      clampValue<int>(index, 0, kPicoLfoPulseWidthStepCount - 1) *
+          kPicoLfoPulseWidthStepPercent);
+}
+
+inline uint8_t clampPicoLfoLink(int value) {
+  return static_cast<uint8_t>(clampValue<int>(value, 0, kPicoLfoLinkCount - 1));
+}
+
+inline uint8_t clampPicoLfoPhaseOffset(int value) {
+  return static_cast<uint8_t>(clampValue<int>(value, 0, kPicoLfoPhaseOffsetCount - 1));
+}
+
+inline uint8_t clampPicoClockSource(int value) {
+  return static_cast<uint8_t>(clampValue<int>(value, 0, kPicoClockSourceCount - 1));
+}
+
+// LFO2 rate as a ratio of LFO1: numerator over denominator.
+inline uint8_t picoLfoLinkNumerator(uint8_t link) {
+  switch (clampPicoLfoLink(link)) {
+    case kPicoLfoLink3to2:
+      return 3;
+    case kPicoLfoLink2to1:
+      return 2;
+    case kPicoLfoLink4to1:
+      return 4;
+    default:
+      return 1;
+  }
+}
+
+inline uint8_t picoLfoLinkDenominator(uint8_t link) {
+  switch (clampPicoLfoLink(link)) {
+    case kPicoLfoLink1to2:
+      return 2;
+    case kPicoLfoLink1to4:
+      return 4;
+    case kPicoLfoLink3to2:
+      return 2;
+    default:
+      return 1;
+  }
+}
+
+inline const char* picoLfoLinkName(uint8_t link) {
+  switch (clampPicoLfoLink(link)) {
+    case kPicoLfoLink1to1:
+      return "1:1";
+    case kPicoLfoLink1to2:
+      return "1:2";
+    case kPicoLfoLink1to4:
+      return "1:4";
+    case kPicoLfoLink3to2:
+      return "3:2";
+    case kPicoLfoLink2to1:
+      return "2:1";
+    case kPicoLfoLink4to1:
+      return "4:1";
+    case kPicoLfoLinkOff:
+    default:
+      return "off";
+  }
+}
+
+inline uint16_t picoLfoPhaseOffsetDegrees(uint8_t phaseOffset) {
+  return static_cast<uint16_t>(clampPicoLfoPhaseOffset(phaseOffset)) * 90;
+}
+
+inline const char* picoClockSourceName(uint8_t source) {
+  switch (clampPicoClockSource(source)) {
+    case kPicoClockLfo1:
+      return "lfo1";
+    case kPicoClockLfo2:
+      return "lfo2";
+    case kPicoClockOff:
+    default:
+      return "off";
+  }
+}
+
+inline const char* picoClockSourceDisplayLabel(uint8_t source) {
+  switch (clampPicoClockSource(source)) {
+    case kPicoClockLfo1:
+      return "LFO1";
+    case kPicoClockLfo2:
+      return "LFO2";
+    case kPicoClockOff:
+    default:
+      return "OFF";
+  }
 }
 
 inline const char* picoOutputModeName(uint8_t mode) {
@@ -139,6 +310,10 @@ inline const char* picoLfoWaveName(uint8_t wave) {
       return "square";
     case kPicoLfoPulse:
       return "pulse";
+    case kPicoLfoSampleHold:
+      return "sh";
+    case kPicoLfoDrift:
+      return "drift";
     case kPicoLfoSine:
     default:
       return "sine";
@@ -157,6 +332,10 @@ inline const char* picoLfoWaveDisplayLabel(uint8_t wave) {
       return "SQR";
     case kPicoLfoPulse:
       return "PULS";
+    case kPicoLfoSampleHold:
+      return "SH";
+    case kPicoLfoDrift:
+      return "DRF";
     case kPicoLfoSine:
     default:
       return "SIN";
@@ -200,7 +379,28 @@ inline float attenuatePicoLfoWaveValue(float value, uint8_t depthPercent) {
   return clampValue(0.5f + (clampValue(value, 0.0f, 1.0f) - 0.5f) * depth, 0.0f, 1.0f);
 }
 
-inline float computePicoLfoWaveValue(float phase, uint8_t wave) {
+inline float offsetPicoLfoWaveValue(float value, int8_t offsetPercent) {
+  float offset = static_cast<float>(clampPicoLfoOffsetPercent(offsetPercent)) / 100.0f;
+  return clampValue(clampValue(value, 0.0f, 1.0f) + offset, 0.0f, 1.0f);
+}
+
+// Deterministic per-cycle random in [0, 1); same (cycle, seed) always yields the
+// same value, so S+H and drift stay stable across control-loop reruns.
+inline float picoLfoRandomUnit(uint32_t cycle, uint32_t seed) {
+  uint32_t x = cycle * 0x9E3779B9u ^ (seed + 0x85EBCA6Bu);
+  x ^= x >> 16;
+  x *= 0x7FEB352Du;
+  x ^= x >> 15;
+  x *= 0x846CA68Bu;
+  x ^= x >> 16;
+  return static_cast<float>(x >> 8) * (1.0f / 16777216.0f);
+}
+
+inline float computePicoLfoWaveValue(float phase,
+                                     uint8_t wave,
+                                     uint32_t cycle = 0,
+                                     uint32_t seed = 0,
+                                     uint8_t pulseWidthPercent = kPicoDefaultLfoPulseWidthPercent) {
   phase = phase - floorf(phase);
   if (phase < 0.0f) {
     phase += 1.0f;
@@ -216,10 +416,46 @@ inline float computePicoLfoWaveValue(float phase, uint8_t wave) {
     case kPicoLfoSquare:
       return phase < 0.5f ? 1.0f : 0.0f;
     case kPicoLfoPulse:
-      return phase < 0.25f ? 1.0f : 0.0f;
+      return phase < static_cast<float>(clampPicoLfoPulseWidth(pulseWidthPercent)) / 100.0f
+                 ? 1.0f
+                 : 0.0f;
+    case kPicoLfoSampleHold:
+      return picoLfoRandomUnit(cycle, seed);
+    case kPicoLfoDrift: {
+      float from = picoLfoRandomUnit(cycle, seed);
+      float to = picoLfoRandomUnit(cycle + 1u, seed);
+      float t = phase * phase * (3.0f - 2.0f * phase);
+      return from + (to - from) * t;
+    }
     case kPicoLfoSine:
     default:
       return 0.5f + 0.5f * sinf(phase * 6.28318530718f);
+  }
+}
+
+// Derive LFO2's phase and cycle from LFO1 when linked, so the pair never
+// drifts. The ratio is numerator:denominator of LFO2 rate vs LFO1 rate and the
+// phase offset shifts LFO2 by quarter cycles.
+inline void computePicoLinkedPhase(float sourcePhase,
+                                   uint32_t sourceCycle,
+                                   uint8_t link,
+                                   uint8_t phaseOffset,
+                                   float* outPhase,
+                                   uint32_t* outCycle) {
+  uint8_t num = picoLfoLinkNumerator(link);
+  uint8_t den = picoLfoLinkDenominator(link);
+  sourcePhase = clampValue(sourcePhase - floorf(sourcePhase), 0.0f, 1.0f);
+
+  float posInBlock = static_cast<float>(sourceCycle % den) + sourcePhase;
+  float scaled = (posInBlock * static_cast<float>(num)) / static_cast<float>(den) +
+                 static_cast<float>(clampPicoLfoPhaseOffset(phaseOffset)) * 0.25f;
+  float wholeInBlock = floorf(scaled);
+
+  if (outPhase != nullptr) {
+    *outPhase = scaled - wholeInBlock;
+  }
+  if (outCycle != nullptr) {
+    *outCycle = (sourceCycle / den) * num + static_cast<uint32_t>(wholeInBlock);
   }
 }
 
@@ -361,16 +597,16 @@ inline int32_t computePicoCenteredOutputMicrovolts(
       computePicoLinearToeMicrovolts(semitones, centerMicrovolts, octaveMicrovolts));
 }
 
-inline uint16_t microvoltsToMcp4725Code(int32_t microvolts,
+inline uint16_t microvoltsToMcp4728Code(int32_t microvolts,
                                         int32_t fullScaleMicrovolts = kPicoDacFullScaleMicrovolts) {
   if (fullScaleMicrovolts <= 0) {
     return 0;
   }
 
   int64_t clamped = clampValue<int64_t>(microvolts, 0, fullScaleMicrovolts);
-  int64_t code = (clamped * kMcp4725MaxCode + (fullScaleMicrovolts / 2)) /
+  int64_t code = (clamped * kMcp4728MaxCode + (fullScaleMicrovolts / 2)) /
                  fullScaleMicrovolts;
-  return static_cast<uint16_t>(clampValue<int64_t>(code, 0, kMcp4725MaxCode));
+  return static_cast<uint16_t>(clampValue<int64_t>(code, 0, kMcp4728MaxCode));
 }
 
 inline const char* picoAbsoluteIntervalLabel(uint8_t semitones) {
