@@ -18,6 +18,7 @@ Built with:
 | --- | --- |
 | Arduino firmware | `pico/PrecisionExpressionControllerPico/PrecisionExpressionControllerPico.ino` |
 | User/menu manual | `docs/user-manual.md` |
+| Therevox sample patches | `docs/sample-patches.md` |
 | Wiring and bench test | `docs/pico-prototype.md` |
 | Perfboard/enclosure layout | `docs/pico-physical-layout.md` |
 | BOM | `docs/bom.md` |

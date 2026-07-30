@@ -8,6 +8,9 @@ LFO1  first 3.5mm patch output
 LFO2  second 3.5mm patch output
 ```
 
+For patch-panel ideas using these outputs with the Therevox ET-5, see
+`sample-patches.md`.
+
 The encoder edits one output at a time. Double-click the encoder to cycle the
 edit target:
 
