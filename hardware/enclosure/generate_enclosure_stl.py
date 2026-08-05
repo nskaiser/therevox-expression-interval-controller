@@ -16,6 +16,7 @@ from typing import Callable, Iterable, List, Sequence, Tuple
 
 Point = Tuple[float, float, float]
 Triangle = Tuple[Point, Point, Point]
+INCH_MM = 25.4
 
 
 @dataclass(frozen=True)
@@ -51,17 +52,46 @@ LID_OVERHANG = 0.4
 
 # Panel cutouts.
 OLED_WINDOW_W = 30.0
-OLED_WINDOW_H = 11.0
+OLED_WINDOW_H = 11.5
 OLED_CENTER_Y = 18.0
 ENCODER_HOLE_D = 7.4
 ENCODER_CENTER_Y = -18.0
 
-# Side cutouts. Most 1/4" panel jacks want about 9.5-10 mm.
-TRS_HOLE_D = 10.5
-TRS_CENTER_Z = 18.0
-LFO_HOLE_D = 6.5
+# Perfboard mounting geometry. This targets the 90 mm x 70 mm perfboard used in
+# the docs. The board is mounted landscape: 90 mm left/right and 70 mm
+# rear/front. Board holes are 3.0 mm diameter. The hole edge starts 1.3 mm
+# from the 70 mm side edges and 0.6 mm from the 90 mm side edges, so center
+# insets are edge distance plus 1.5 mm radius.
+PERFBOARD_WIDTH = 90.0
+PERFBOARD_DEPTH = 70.0
+PERFBOARD_MOUNT_HOLE_INSET_X = 2.8
+PERFBOARD_MOUNT_HOLE_INSET_Y = 2.1
+PERFBOARD_POST_HEIGHT = 7.0
+PERFBOARD_POST_OUTER_D = 7.0
+PERFBOARD_POST_INNER_D = 3.2
+PERFBOARD_THICKNESS = 1.6
+PERFBOARD_TOP_Z = BOTTOM + PERFBOARD_POST_HEIGHT + PERFBOARD_THICKNESS
+
+# Open baseplate. This is the preferred raw-build print: no walls, no lid, just
+# a smooth protective bottom and the four perfboard risers.
+BASEPLATE_MARGIN = 4.0
+BASEPLATE_WIDTH = PERFBOARD_WIDTH + 2 * BASEPLATE_MARGIN
+BASEPLATE_DEPTH = PERFBOARD_DEPTH + 2 * BASEPLATE_MARGIN
+
+# Side/front jack cutouts are rectangular because these parts sit on the
+# perfboard and need body clearance in the enclosure wall, not just round panel
+# bushing holes.
+TRS_OPENING_W = 23.0 / 32.0 * INCH_MM
+TRS_OPENING_H = 23.0 / 32.0 * INCH_MM
+TRS_BOTTOM_Z = PERFBOARD_TOP_Z
+TRS_CENTER_Z = TRS_BOTTOM_Z + TRS_OPENING_H / 2
+
+LFO_OPENING_SCALE = 1.2
+LFO_OPENING_W = 6.0 / 32.0 * INCH_MM * LFO_OPENING_SCALE
+LFO_OPENING_H = 6.0 / 32.0 * INCH_MM * LFO_OPENING_SCALE
+LFO_BOTTOM_Z = PERFBOARD_TOP_Z + 5.0 / 32.0 * INCH_MM
+LFO_CENTER_Z = LFO_BOTTOM_Z + LFO_OPENING_H / 2
 LFO_CENTER_X_OFFSET = 16.0
-LFO_CENTER_Z = 16.0
 USB_WINDOW_W = 18.0
 USB_WINDOW_H = 10.0
 USB_CENTER_Z = 16.0
@@ -72,16 +102,6 @@ POST_OUTER_D = 8.0
 POST_INNER_D = 2.7
 POST_MARGIN_X = 10.0
 POST_MARGIN_Y = 8.0
-
-# Perfboard mounting geometry. This targets the 70 mm x 90 mm A-Z / 1-31
-# perfboard used in the docs. Measure the real board before printing and tune
-# PERFBOARD_MOUNT_HOLE_INSET_MM if its corner mounting holes differ.
-PERFBOARD_WIDTH = 70.0
-PERFBOARD_DEPTH = 90.0
-PERFBOARD_MOUNT_HOLE_INSET_MM = 3.0
-PERFBOARD_POST_HEIGHT = 7.0
-PERFBOARD_POST_OUTER_D = 7.0
-PERFBOARD_POST_INNER_D = 2.7
 
 # Mesh resolution for cutout edges. Smaller is cleaner but larger STL.
 GRID = 0.8
@@ -156,12 +176,35 @@ def frange(start: float, stop: float, step: float) -> List[float]:
     return vals
 
 
+def add_unique_coord(vals: List[float], value: float, minimum: float, maximum: float) -> None:
+    if value <= minimum or value >= maximum:
+        return
+    if not any(abs(existing - value) < 1e-6 for existing in vals):
+        vals.append(value)
+
+
+def add_hole_boundaries(vals: List[float], holes: Sequence[object],
+                        minimum: float, maximum: float, axis: str) -> List[float]:
+    for hole in holes:
+        if isinstance(hole, RectHole):
+            center = hole.cx if axis == "x" else hole.cy
+            size = hole.w if axis == "x" else hole.h
+            add_unique_coord(vals, center - size / 2, minimum, maximum)
+            add_unique_coord(vals, center + size / 2, minimum, maximum)
+        elif isinstance(hole, CircleHole):
+            center = hole.cx if axis == "x" else hole.cy
+            radius = hole.diameter / 2
+            add_unique_coord(vals, center - radius, minimum, maximum)
+            add_unique_coord(vals, center + radius, minimum, maximum)
+    return sorted(vals)
+
+
 def add_grid_plate(mesh: List[Triangle], umin: float, umax: float, vmin: float, vmax: float,
                    w0: float, w1: float, holes: Sequence[object],
                    mapper: Callable[[float, float, float], Point],
                    grid: float = GRID) -> None:
-    us = frange(umin, umax, grid)
-    vs = frange(vmin, vmax, grid)
+    us = add_hole_boundaries(frange(umin, umax, grid), holes, umin, umax, "x")
+    vs = add_hole_boundaries(frange(vmin, vmax, grid), holes, vmin, vmax, "y")
     nu = len(us) - 1
     nv = len(vs) - 1
 
@@ -231,8 +274,8 @@ def make_body() -> List[Triangle]:
     # Bottom plate.
     add_box(mesh, -w / 2, w / 2, -d / 2, d / 2, 0.0, BOTTOM)
 
-    # Left and right side walls with TRS jack cutouts.
-    side_holes = [CircleHole(0.0, TRS_CENTER_Z, TRS_HOLE_D)]
+    # Left and right side walls with board-mounted 1/4" TRS jack cutouts.
+    side_holes = [RectHole(0.0, TRS_CENTER_Z, TRS_OPENING_W, TRS_OPENING_H)]
     add_grid_plate(mesh, -inner_d / 2, inner_d / 2, 0.0, h,
                    -w / 2, -w / 2 + WALL, side_holes,
                    lambda y, z, x: (x, y, z))
@@ -240,10 +283,10 @@ def make_body() -> List[Triangle]:
                    w / 2 - WALL, w / 2, side_holes,
                    lambda y, z, x: (x, y, z))
 
-    # Front wall with two 3.5 mm LFO output jack cutouts.
+    # Front wall with two board-mounted 3.5 mm LFO output jack cutouts.
     front_holes = [
-        CircleHole(-LFO_CENTER_X_OFFSET, LFO_CENTER_Z, LFO_HOLE_D),
-        CircleHole(LFO_CENTER_X_OFFSET, LFO_CENTER_Z, LFO_HOLE_D),
+        RectHole(-LFO_CENTER_X_OFFSET, LFO_CENTER_Z, LFO_OPENING_W, LFO_OPENING_H),
+        RectHole(LFO_CENTER_X_OFFSET, LFO_CENTER_Z, LFO_OPENING_W, LFO_OPENING_H),
     ]
     add_grid_plate(mesh, -inner_w / 2, inner_w / 2, 0.0, h,
                    d / 2 - WALL, d / 2, front_holes,
@@ -268,9 +311,9 @@ def make_body() -> List[Triangle]:
                 POST_INNER_D,
             )
 
-    # Short internal posts for the full-size 70 mm x 90 mm perfboard.
-    board_post_x = PERFBOARD_WIDTH / 2 - PERFBOARD_MOUNT_HOLE_INSET_MM
-    board_post_y = PERFBOARD_DEPTH / 2 - PERFBOARD_MOUNT_HOLE_INSET_MM
+    # Short internal posts for the full-size 90 mm x 70 mm perfboard.
+    board_post_x = PERFBOARD_WIDTH / 2 - PERFBOARD_MOUNT_HOLE_INSET_X
+    board_post_y = PERFBOARD_DEPTH / 2 - PERFBOARD_MOUNT_HOLE_INSET_Y
     for sx in (-1, 1):
         for sy in (-1, 1):
             add_hollow_cylinder(
@@ -283,6 +326,37 @@ def make_body() -> List[Triangle]:
                 PERFBOARD_POST_INNER_D,
             )
 
+    return mesh
+
+
+def add_perfboard_posts(mesh: List[Triangle]) -> None:
+    board_post_x = PERFBOARD_WIDTH / 2 - PERFBOARD_MOUNT_HOLE_INSET_X
+    board_post_y = PERFBOARD_DEPTH / 2 - PERFBOARD_MOUNT_HOLE_INSET_Y
+    for sx in (-1, 1):
+        for sy in (-1, 1):
+            add_hollow_cylinder(
+                mesh,
+                sx * board_post_x,
+                sy * board_post_y,
+                BOTTOM,
+                BOTTOM + PERFBOARD_POST_HEIGHT,
+                PERFBOARD_POST_OUTER_D,
+                PERFBOARD_POST_INNER_D,
+            )
+
+
+def make_baseplate() -> List[Triangle]:
+    mesh: List[Triangle] = []
+    add_box(
+        mesh,
+        -BASEPLATE_WIDTH / 2,
+        BASEPLATE_WIDTH / 2,
+        -BASEPLATE_DEPTH / 2,
+        BASEPLATE_DEPTH / 2,
+        0.0,
+        BOTTOM,
+    )
+    add_perfboard_posts(mesh)
     return mesh
 
 
@@ -305,8 +379,10 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
     write_ascii_stl(out_dir / "expression_controller_body.stl", "expression_controller_body", make_body())
     write_ascii_stl(out_dir / "expression_controller_lid.stl", "expression_controller_lid", make_lid())
+    write_ascii_stl(out_dir / "expression_controller_baseplate.stl", "expression_controller_baseplate", make_baseplate())
     print(f"Wrote {out_dir / 'expression_controller_body.stl'}")
     print(f"Wrote {out_dir / 'expression_controller_lid.stl'}")
+    print(f"Wrote {out_dir / 'expression_controller_baseplate.stl'}")
 
 
 if __name__ == "__main__":

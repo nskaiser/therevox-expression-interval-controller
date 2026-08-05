@@ -31,70 +31,169 @@ The generated enclosure dimensions are:
 | Feature | Position |
 | --- | --- |
 | Body outside | `126mm x 112mm x 34mm` |
-| OLED window | lid centerline, front half, `30mm x 11mm` |
+| OLED window | lid centerline, front half, `30mm x 11.5mm` |
 | Encoder hole | lid centerline, rear half, `7.4mm` diameter |
-| Expression input jack | left side wall, centered front/back |
-| Therevox output jack | right side wall, centered front/back |
-| LFO1 3.5mm jack | front wall, left of center, `6.5mm` nominal hole |
-| LFO2 3.5mm jack | front wall, right of center, `6.5mm` nominal hole |
+| Expression input jack | left side wall, centered front/back, square `23/32 inch` / `18.26mm` opening |
+| Therevox output jack | right side wall, centered front/back, square `23/32 inch` / `18.26mm` opening |
+| LFO1 3.5mm jack | front wall, left of center, square `5.72mm` opening, `20%` larger than the measured `6/32 inch` jack body |
+| LFO2 3.5mm jack | front wall, right of center, square `5.72mm` opening, `20%` larger than the measured `6/32 inch` jack body |
 | USB/service opening | rear wall, centered left/right |
 
 ## Perfboard Size And Placement
 
-Use the full `70mm x 90mm` perfboard with printed columns `A-Z` and rows
-`1-31`. Do not cut it down.
+Use the full `90mm x 70mm` perfboard, mounted landscape. Do not cut it down.
 
 ```text
-Board width left/right: 70mm, columns A-Z
-Board depth rear/front: 90mm, rows 1-31
+Board width left/right: 90mm
+Board depth rear/front: 70mm
 ```
 
 Place it on the enclosure floor like this:
 
 - Centered left/right.
 - Centered rear/front.
-- Printed row `1` nearest the rear USB opening.
-- Printed row `31` nearest the front/player side.
-- Printed column `A` nearest the expression input jack.
-- Printed column `Z` nearest the Therevox output jack.
+- Long `90mm` edge runs left/right.
+- Short `70mm` edge runs rear/front.
+- The long horizontal lettering sequence, `A-Z` then restarting at `A`, runs
+  left/right.
+- The short vertical `A-Z` lettering sequence runs rear/front.
 - Pico USB end facing the rear USB opening.
 - Mount the four board corner holes over the four short printed perfboard posts.
 
-The generated enclosure assumes the perfboard corner mounting-hole centers are
-`3.0mm` in from each board edge. That gives post spacing of:
+The generated baseplate uses your measured `3mm` perfboard corner holes. The
+hole edge starts `1.3mm` from the left/right `70mm` side edges and `0.6mm` from
+the top/bottom `90mm` side edges, so the hole centers are `2.8mm` and `2.1mm`
+from those edges. That gives post spacing of:
 
 ```text
-left/right post spacing: 64mm
-rear/front post spacing: 84mm
+left/right post spacing: 84.4mm
+rear/front post spacing: 65.8mm
 ```
 
-The Amazon listing confirms the board is `70mm x 90mm`, but it does not publish
+The Amazon listing confirms the board is `90mm x 70mm`, but it does not publish
 the exact corner-hole center offset. Before printing the full box, measure your
-actual board. If the hole centers are not `3.0mm` from the edges, change
-`PERFBOARD_MOUNT_HOLE_INSET_MM` in
+actual board. If the hole centers differ, change
+`PERFBOARD_MOUNT_HOLE_INSET_X` and `PERFBOARD_MOUNT_HOLE_INSET_Y` in
 `hardware/enclosure/generate_enclosure_stl.py` and regenerate the STL files.
 
 Do not mount the OLED or encoder to the perfboard. They mount to the lid/panel and connect with flexible hookup wires.
 
 ## Perfboard Coordinate System
 
-View the perfboard from above with the USB opening at the top.
+View the perfboard from above with the USB opening at the top. The exact
+printed labels vary by board side; the mechanical STL only depends on the
+`90mm x 70mm` outline and corner mounting holes.
 
 ```text
 Rear / USB side
 
-columns:  A  B  C ... Z
-rows:     1  2  3 ... 31
+left/right: 90mm long edge
+rear/front: 70mm short edge
 
 Front / player side
 ```
 
 The plan below assumes:
 
-- Row `1` is nearest the rear USB opening.
-- Row `31` is nearest the front/player side.
-- Column `A` is nearest the expression input jack.
-- Column `Z` is nearest the Therevox output jack.
+- The long `90mm` edge runs left/right.
+- The short `70mm` edge runs rear/front.
+- Pico USB faces the rear USB opening.
+- The board is centered over the four printed perfboard posts.
+
+## Step-By-Step Perfboard Transfer
+
+Use this order when moving the tested breadboard circuit onto perfboard. Keep
+the board loose until the electrical tests pass, then mount it in the printed
+body.
+
+1. Dry-fit the empty perfboard in the printed body.
+   - Long `90mm` edge runs left/right.
+   - Short `70mm` edge runs rear/front.
+   - Pico USB will face the rear USB opening.
+   - The four corner holes should sit over the four printed perfboard posts.
+
+2. Put the Pico H on the perfboard, but do not solder every pin yet.
+   - Pico USB connector points toward row `1` / rear USB opening.
+   - Pico physical pin `1` sits at row `4`, column `J`.
+   - Pico physical pin `20` sits at row `23`, column `J`.
+   - Pico physical pin `40` sits at row `4`, column `Q`.
+   - Pico physical pin `21` sits at row `23`, column `Q`.
+   - Dry-fit the perfboard in the enclosure with a USB cable plugged in before
+     soldering the Pico permanently.
+
+3. Make the two underside power buses.
+   - `3V3` bus: row `29`, columns `B-Y`.
+   - `GND` bus: row `30`, columns `B-Y`.
+   - Connect Pico `3V3(OUT)`, physical pin `36`, row `8` column `Q`, to row `29`.
+   - Connect Pico `GND`, physical pin `38`, row `6` column `Q`, to row `30`.
+   - Connect Pico `GND`, physical pin `33`, row `11` column `Q`, to row `30`.
+   - Before adding modules, power from USB and verify row `29` to row `30` is
+     about `3.3V`.
+
+4. Build the I2C fanout at the left rear.
+   - Bridge row `4`, columns `B-D` for `3V3`.
+   - Bridge row `5`, columns `B-D` for `GND`.
+   - Bridge row `6`, columns `B-D` for `SDA`.
+   - Bridge row `7`, columns `B-D` for `SCL`.
+   - Wire row `6` fanout to Pico `GP4`, physical pin `6`, row `9` column `J`.
+   - Wire row `7` fanout to Pico `GP5`, physical pin `7`, row `10` column `J`.
+   - Wire row `4` fanout to the row `29` `3V3` bus.
+   - Wire row `5` fanout to the row `30` `GND` bus.
+
+5. Move the expression input circuit.
+   - Input TRS Sleeve goes to `GND` bus row `30`, column `C`.
+   - Input TRS Ring goes to `3V3` bus row `29`, column `C`.
+   - Input TRS Tip goes to row `13`, column `B`.
+   - Put the `1k` input resistor from row `13`, column `B` to row `13`, column `P`.
+   - Bridge row `13`, columns `P-Q`; row `13`, column `Q` is Pico `GP26/ADC0`.
+   - Put the `100nF` capacitor from row `13`, column `P` to row `11`, column `P`.
+   - Bridge row `11`, columns `P-Q`; row `11`, column `Q` is Pico `GND` pin `33`.
+
+6. Wire the MCP4728 quad DAC.
+   - DAC `V` goes to the `3V3` fanout.
+   - DAC `S` goes to the `GND` fanout; this board's ground pin is printed `S`.
+   - DAC `DA` goes to the `SDA` fanout.
+   - DAC `CL` goes to the `SCL` fanout.
+   - DAC `L` goes to the `GND` bus.
+   - DAC `R` is left unconnected.
+   - DAC `A` goes to row `14`, column `S`.
+   - DAC `B` goes to row `16`, column `S`.
+   - DAC `C` goes to row `18`, column `S`.
+   - DAC `D` is optional clock output; leave it unconnected unless you add a
+     third 3.5mm jack.
+
+7. Wire the output jacks.
+   - Put a `1k` resistor from row `14`, column `S` to row `14`, column `Y`.
+   - Therevox output physical Tip goes to row `14`, column `Y`.
+   - Therevox output Sleeve goes to `GND` bus row `30`, column `Z`.
+   - Therevox output Ring is left unconnected.
+   - Put a `1k` resistor from row `16`, column `S` to row `16`, column `Y`.
+   - LFO1 3.5mm Tip goes to row `16`, column `Y`.
+   - LFO1 Sleeve goes to `GND` bus row `30`, column `X`.
+   - Put a `1k` resistor from row `18`, column `S` to row `18`, column `Y`.
+   - LFO2 3.5mm Tip goes to row `18`, column `Y`.
+   - LFO2 Sleeve goes to `GND` bus row `30`, column `Y`.
+
+8. Wire the lid controls with flexible wire slack.
+   - OLED red goes to `3V3` fanout.
+   - OLED black goes to `GND` fanout.
+   - OLED blue goes to `SDA` fanout.
+   - OLED yellow goes to `SCL` fanout.
+   - Encoder `C` / common goes to `GND`.
+   - Encoder `A` / CLK goes to Pico `GP14`, physical pin `19`, row `22` column `J`.
+   - Encoder `B` / DT goes to Pico `GP15`, physical pin `20`, row `23` column `J`.
+   - One encoder switch lug goes to Pico `GP13`, physical pin `17`, row `20` column `J`.
+   - The other encoder switch lug goes to `GND`.
+
+9. Test before final mounting.
+   - With USB power only, verify `3V3` to `GND` is about `3.3V`.
+   - Verify input Ring to Sleeve is about `3.3V`.
+   - Verify the OLED boots and the encoder changes values.
+   - Verify serial reports MCP4728 pass at `0x60` and OLED pass at `0x3C`.
+   - Run fixed CV tests before plugging into the Therevox: `cv 0`, `cv 1000`,
+     and `cv 3200`, measuring output physical Tip to Sleeve.
+   - Only after those checks pass, mount the perfboard to the printed posts and
+     add strain relief to the jack and lid wires.
 
 ## Pico Placement
 
@@ -165,7 +264,7 @@ Solder the OLED STEMMA cable pigtail and the MCP4728 I2C/power wires to this fan
 | Blue | `SDA` |
 | Yellow | `SCL` |
 
-The OLED cable goes to the OLED on the lid. The MCP4728 DAC uses the same four I2C/power signals from this fanout through its `VCC`, `GND`, `SDA`, and `SCL` header pins.
+The OLED cable goes to the OLED on the lid. The MCP4728 DAC uses the same four I2C/power signals from this fanout through its `V`, `S`, `DA`, and `CL` header pins. The DAC ground pin is printed as `S`; there may not be a separate `GND` label on the breakout.
 
 ## Expression Input Jack
 
@@ -202,40 +301,41 @@ Panel-mount the Therevox output jack in the right side hole.
 
 Panel-mount the `LFO1` and `LFO2` 3.5mm jacks in the front wall. If those jacks are TRS, use only `Tip` and `Sleeve`; leave `Ring` unconnected.
 
-Mount the MCP4728 breakout near the right/front side of the enclosure, close to the output jacks. It can sit on the perfboard right side or on the enclosure floor with foam tape/standoffs. Its I2C/power pins connect to `3V3`, `GND`, `SDA`, and `SCL`. Also tie the breakout's `LDAC` pin to the `GND` bus — a floating `LDAC` can freeze all four analog outputs even though I2C writes succeed.
+Mount the MCP4728 breakout near the right/front side of the enclosure, close to the output jacks. It can sit on the perfboard right side or on the enclosure floor with foam tape/standoffs. Its I2C/power pins connect as `V` -> `3V3`, `S` -> `GND`, `DA` -> `SDA`, and `CL` -> `SCL`; again, `S` is the DAC board's ground pin. Also tie the breakout's `L` / `LDAC` pin to the `GND` bus; a floating `LDAC` can freeze all four analog outputs even though I2C writes succeed. Leave `R` / `RDY` unconnected.
 
 The I2C wiring does not carry the DAC outputs, so add these separate wires:
 
 | DAC / output part | Perfboard tie point |
 | --- | --- |
-| MCP4728 `VOUTA` wire | row `14`, column `S` |
+| MCP4728 `A` wire | row `14`, column `S` |
 | `1k` expression output resistor | row `14`, column `S` to row `14`, column `Y` |
 | Therevox output plug physical Tip wire | row `14`, column `Y` |
 | Output plug physical Ring | leave unconnected for active external CV |
 | Output TRS Sleeve | `GND` bus, row `30`, column `Z` |
-| MCP4728 `VOUTB` wire | row `16`, column `S` |
+| MCP4728 `B` wire | row `16`, column `S` |
 | `1k` LFO1 resistor | row `16`, column `S` to row `16`, column `Y` |
 | LFO1 3.5mm Tip wire | row `16`, column `Y` |
 | LFO1 3.5mm Sleeve | `GND` bus, row `30`, column `X` |
-| MCP4728 `VOUTC` wire | row `18`, column `S` |
+| MCP4728 `C` wire | row `18`, column `S` |
 | `1k` LFO2 resistor | row `18`, column `S` to row `18`, column `Y` |
 | LFO2 3.5mm Tip wire | row `18`, column `Y` |
 | LFO2 3.5mm Sleeve | `GND` bus, row `30`, column `Y` |
-| MCP4728 `LDAC` wire | `GND` bus, row `30` |
-| MCP4728 `VOUTD` | optional: `1k` to a spare 3.5mm clock jack (`clock lfo1|lfo2`); otherwise leave unconnected |
+| MCP4728 `L` wire | `GND` bus, row `30` |
+| MCP4728 `R` | leave unconnected |
+| MCP4728 `D` | optional: `1k` to a spare 3.5mm clock jack (`clock lfo1|lfo2`); otherwise leave unconnected |
 
 Output circuit:
 
 ```text
-MCP4728 VOUTA ---- 1k ---- Therevox output plug physical Tip
+MCP4728 A ---- 1k ---- Therevox output plug physical Tip
 Output TRS Sleeve -------- GND
 
 Output plug physical Ring - not connected
 
-MCP4728 VOUTB ---- 1k ---- LFO1 3.5mm Tip
+MCP4728 B ---- 1k ---- LFO1 3.5mm Tip
 LFO1 Sleeve --------------- GND
 
-MCP4728 VOUTC ---- 1k ---- LFO2 3.5mm Tip
+MCP4728 C ---- 1k ---- LFO2 3.5mm Tip
 LFO2 Sleeve --------------- GND
 ```
 
@@ -292,9 +392,10 @@ Do not try to mount the breadboard in the enclosure. Once the circuit works, tra
 
 Before final soldering:
 
-- Before printing the full enclosure, measure the perfboard corner mounting-hole
-  centers. If they are not `64mm x 84mm` apart, update
-  `PERFBOARD_MOUNT_HOLE_INSET_MM` in the enclosure generator and regenerate.
+- Before printing the full enclosure or baseplate, measure the perfboard corner
+  mounting-hole centers. If they are not `84.4mm x 65.8mm` apart, update
+  `PERFBOARD_MOUNT_HOLE_INSET_X` / `PERFBOARD_MOUNT_HOLE_INSET_Y` in the
+  enclosure generator and regenerate.
 - Dry-fit the Pico/perfboard in the enclosure with the USB cable plugged in.
 - Confirm the side jack lugs do not touch the perfboard or Pico.
 - Confirm the encoder body clears the Pico and wires when the lid is closed.

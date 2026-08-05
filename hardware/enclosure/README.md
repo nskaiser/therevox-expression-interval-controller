@@ -7,6 +7,7 @@ First-pass printable enclosure for the Pico/DAC/OLED/rotary-encoder prototype.
 Generated files:
 
 ```text
+stl/expression_controller_baseplate.stl
 stl/expression_controller_body.stl
 stl/expression_controller_lid.stl
 ```
@@ -24,28 +25,41 @@ generate_enclosure_stl.py
 - Lid thickness: `3 mm`
 - Wall thickness: `2.4 mm`
 - Fits a Prusa Mini build plate.
+- Perfboard footprint: `90 mm x 70 mm`, mounted landscape.
+- Open baseplate footprint: `98 mm x 78 mm`, giving `4 mm` margin around the
+  perfboard and no side walls or lid.
+- Perfboard post height: `7 mm`, so the top of a nominal `1.6 mm` board sits
+  about `11 mm` above the enclosure floor.
 
 ## Cutouts
 
-- Top lid OLED window: `30 mm x 11 mm`
+- Top lid OLED window: `30 mm x 11.5 mm`
 - Top lid rotary encoder hole: `7.4 mm`
-- Left/right side TRS jack holes: `10.5 mm`
-- Front 3.5mm LFO jack holes: `6.5 mm`
+- Left/right side TRS jack openings: square `23/32 inch` / `18.26 mm`,
+  starting at the perfboard top surface.
+- Front 3.5mm LFO jack openings: square `5.72 mm` / `20%` larger than `6/32 inch`, with the
+  bottom edge `5/32 inch` / `3.97 mm` above the perfboard top surface.
 - Rear USB/service opening: `18 mm x 10 mm`
 - Lid screws: `M2.5` clearance holes
 - Internal corner posts: `M2.5` pilot holes
-- Internal perfboard posts: four short posts for a centered `70 mm x 90 mm` board
+- Internal perfboard posts: four short posts for a centered `90 mm x 70 mm` board
 
-The TRS holes are sized for common 1/4 inch panel jacks, but jack bushings vary. If your jacks need a different diameter, adjust `TRS_HOLE_D` in `generate_enclosure_stl.py` and regenerate.
-
-The 3.5mm holes are sized for small threaded panel jacks, but those vary too. If
-your jacks need a different diameter, adjust `LFO_HOLE_D` in
+The TRS side openings are sized for your square-body 1/4 inch jacks. If your
+jacks need a different opening, adjust `TRS_OPENING_W` / `TRS_OPENING_H` in
 `generate_enclosure_stl.py` and regenerate.
 
-The perfboard posts assume the board's corner mounting-hole centers are `3.0 mm`
-in from each edge, giving `64 mm x 84 mm` post spacing. If your board measures
-differently, adjust `PERFBOARD_MOUNT_HOLE_INSET_MM` in
+The 3.5mm front openings are sized from your `5/32 inch` to `11/32 inch`
+above-perfboard measurement. If those jacks need a different opening, adjust
+`LFO_OPENING_W`, `LFO_OPENING_H`, or `LFO_BOTTOM_Z` in
 `generate_enclosure_stl.py` and regenerate.
+
+The perfboard posts use your measured `3 mm` board holes. The hole edge starts
+`1.3 mm` from the left/right `70 mm` side edges and `0.6 mm` from the top/bottom
+`90 mm` side edges, so the center insets are `2.8 mm` and `2.1 mm`. That gives
+`84.4 mm x 65.8 mm` post spacing. The printed pilot holes are `3.2 mm` diameter
+for tolerance. If your board measures
+differently, adjust `PERFBOARD_MOUNT_HOLE_INSET_X` /
+`PERFBOARD_MOUNT_HOLE_INSET_Y` in `generate_enclosure_stl.py` and regenerate.
 
 ## Print
 
@@ -61,10 +75,13 @@ Supports: off, or build-plate-only if your slicer wants support for the rear USB
 
 Print orientation:
 
+- `expression_controller_baseplate.stl`: flat bottom face on the build plate.
 - `expression_controller_body.stl`: bottom face on the build plate, open side upward.
 - `expression_controller_lid.stl`: outside/top face upward.
 
-Before printing the full body, print the lid first and test-fit the OLED and encoder. Those two holes are the most likely to need small tolerance tweaks.
+The baseplate is now the preferred raw-build part: it protects the soldered
+underside and provides the four perfboard risers without enclosing the controls.
+The full body/lid files remain available as older enclosure experiments.
 
 ## Intended Layout
 

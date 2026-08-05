@@ -163,9 +163,9 @@ While linked, LFO2's own speed setting is ignored, and turning the encoder with
 
 ## Clock Output
 
-`CLK` drives the MCP4728's spare fourth channel (`VOUTD`) with a full-swing
+`CLK` drives the MCP4728's spare fourth channel (`D`) with a full-swing
 `0/3.3V` square at LFO1's or LFO2's rate, ignoring that LFO's wave, depth, and
-offset. Wire `VOUTD` through a 1k resistor to a spare 3.5mm jack to clock
+offset. Wire `D` through a 1k resistor to a spare 3.5mm jack to clock
 external gear in time with your modulation.
 
 ## Sync And Tap Tempo

@@ -14,17 +14,19 @@
 //   Expression input TRS Tip    -> 1k resistor -> Pico pin labeled GP26/ADC0, physical pin 31
 //   GP26/ADC0 side of 1k       -> 100nF capacitor -> GND
 //
-//   MCP4728 VCC                 -> Pico pin labeled 3V3(OUT), physical pin 36
-//   MCP4728 GND                 -> Pico pin labeled GND, physical pin 38
-//   MCP4728 SDA                 -> Pico pin labeled GP4, physical pin 6
-//   MCP4728 SCL                 -> Pico pin labeled GP5, physical pin 7
-//   MCP4728 LDAC                -> GND (required; outputs freeze if LDAC floats high)
-//   MCP4728 VOUTA               -> 1k resistor -> output plug physical Tip
+//   MCP4728 V                   -> Pico pin labeled 3V3(OUT), physical pin 36
+//   MCP4728 S                   -> Pico pin labeled GND, physical pin 38
+//                                  The DAC board ground pin is printed "S".
+//   MCP4728 DA                  -> Pico pin labeled GP4, physical pin 6
+//   MCP4728 CL                  -> Pico pin labeled GP5, physical pin 7
+//   MCP4728 L                   -> GND (required; outputs freeze if LDAC floats high)
+//   MCP4728 R                   -> not connected
+//   MCP4728 A                   -> 1k resistor -> output plug physical Tip
 //   Output plug physical Ring   -> not connected for active external CV
 //   Output TRS Sleeve           -> GND
-//   MCP4728 VOUTB               -> 1k resistor -> LFO 1 3.5mm jack Tip
-//   MCP4728 VOUTC               -> 1k resistor -> LFO 2 3.5mm jack Tip
-//   MCP4728 VOUTD               -> 1k resistor -> optional clock 3.5mm jack Tip
+//   MCP4728 B                   -> 1k resistor -> LFO 1 3.5mm jack Tip
+//   MCP4728 C                   -> 1k resistor -> LFO 2 3.5mm jack Tip
+//   MCP4728 D                   -> 1k resistor -> optional clock 3.5mm jack Tip
 //   LFO 1/2/clock jack Sleeve   -> GND
 //
 //   The firmware uses MCP4728 multi-write commands (UDAC=0), which set
@@ -51,7 +53,7 @@
 //   In LO/FM, the expression pedal sweeps LFO speed and the encoder sets depth.
 //   LFO 1 and LFO 2 are independent dedicated patch-panel CV outputs.
 //   LFO 2 can link to LFO 1 at a rate ratio with a quarter-cycle phase offset.
-//   VOUTD can emit a full-swing clock square derived from LFO 1 or LFO 2.
+//   DAC D can emit a full-swing clock square derived from LFO 1 or LFO 2.
 //   Double-click the encoder to cycle the active edit target: EXP, LFO1, LFO2.
 //   Repeated single presses on a focused LFO tap-tempo its rate.
 //

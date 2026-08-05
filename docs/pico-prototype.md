@@ -65,16 +65,32 @@ Input TRS Ring ----------- Pico 3V3(OUT)
 
 The OLED STEMMA cable and the MCP4728 header pins connect to the same Pico I2C pins.
 
-| Signal / OLED STEMMA wire | Pico H pin |
+Your MCP4728 board labels are shortened. The ground pin on this breakout is
+printed as `S`; do not look for a separate `GND` pin on the DAC board.
+
+| MCP4728 board pin | Full name | Connect to |
+| --- | --- | --- |
+| `V` | VDD / VCC | Pico `3V3(OUT)`, physical pin `36` |
+| `S` | Ground / VSS; pin is printed `S` | Pico `GND`, physical pin `38` |
+| `CL` | SCL / I2C clock | Pico `GP5`, physical pin `7` |
+| `DA` | SDA / I2C data | Pico `GP4`, physical pin `6` |
+| `L` | LDAC / latch | GND |
+| `R` | RDY/BSY status | leave unconnected |
+| `A` | DAC channel A output | expression output, through `1k` |
+| `B` | DAC channel B output | `LFO1`, through `1k` |
+| `C` | DAC channel C output | `LFO2`, through `1k` |
+| `D` | DAC channel D output | optional clock output, through `1k`; otherwise leave unconnected |
+
+The OLED STEMMA cable stays:
+
+| OLED STEMMA wire | Pico H pin |
 | --- | --- |
 | Red / VCC | `3V3(OUT)`, physical pin `36` |
 | Black / GND | `GND`, physical pin `38` |
 | Blue / SDA | `GP4`, physical pin `6` |
 | Yellow / SCL | `GP5`, physical pin `7` |
 
-On the MCP4728 board, use the pins labeled `VCC`, `GND`, `SDA`, and `SCL`.
-
-**Also wire the MCP4728 `LDAC` pin to `GND`.** If `LDAC` floats high, the chip
+**Wire the MCP4728 `L` pin to `GND`.** If `L` / `LDAC` floats high, the chip
 accepts every I2C write but can hold the analog outputs frozen — the firmware
 uses latch-safe multi-write commands as a backstop, but grounding `LDAC` removes
 the failure mode entirely.
@@ -83,28 +99,66 @@ This is normal I2C sharing. The MCP4728 DAC is `0x60`; the OLED is `0x3C`.
 
 ### MCP4728 DAC Outputs
 
-The I2C cable/header wiring does not carry the DAC outputs. Add regular hookup wires from the DAC `VOUT` pins to the output jacks:
+The I2C cable/header wiring does not carry the DAC outputs. Add regular hookup wires from the DAC output pins to the output jacks:
 
 ```text
-MCP4728 VOUTA ---- 1k ---- Therevox expression output plug physical Tip
+MCP4728 A ---- 1k ---- Therevox expression output plug physical Tip
 Output TRS Sleeve -------- GND
 Output plug physical Ring - not connected
 
-MCP4728 VOUTB ---- 1k ---- LFO1 3.5mm jack Tip
+MCP4728 B ---- 1k ---- LFO1 3.5mm jack Tip
 LFO1 Sleeve --------------- GND
 
-MCP4728 VOUTC ---- 1k ---- LFO2 3.5mm jack Tip
+MCP4728 C ---- 1k ---- LFO2 3.5mm jack Tip
 LFO2 Sleeve --------------- GND
 
-MCP4728 VOUTD ---- 1k ---- optional clock 3.5mm jack Tip (see `clock` command)
+MCP4728 D ---- 1k ---- optional clock 3.5mm jack Tip (see `clock` command)
 Clock jack Sleeve --------- GND
-Leave VOUTD unconnected if you do not need the clock output.
+Leave `D` unconnected if you do not need the clock output.
+```
 
 Do not use the old optional `100k` pulldown or any temporary `10k` to `11k`
 load resistor on any output jack for this active-CV test.
-```
 
 If the 3.5mm jacks are TRS instead of TS, use `Tip` and `Sleeve` only. Leave `Ring` unconnected.
+
+### Replacing the Old Single DAC
+
+Old MCP4725 wiring:
+
+```text
+MCP4725 VCC  -> Pico 3V3(OUT), physical pin 36
+MCP4725 GND  -> Pico GND, physical pin 38
+MCP4725 SDA  -> Pico GP4, physical pin 6
+MCP4725 SCL  -> Pico GP5, physical pin 7
+MCP4725 VOUT -> 1k -> Therevox output physical Tip
+Output Sleeve -> GND
+Output Ring   -> not connected
+```
+
+New MCP4728 wiring:
+
+```text
+MCP4728 V  -> Pico 3V3(OUT), physical pin 36
+MCP4728 S  -> Pico GND, physical pin 38  (this DAC pin is printed `S`)
+MCP4728 DA -> Pico GP4, physical pin 6
+MCP4728 CL -> Pico GP5, physical pin 7
+MCP4728 L  -> GND
+MCP4728 R  -> not connected
+
+MCP4728 A  -> 1k -> Therevox output physical Tip
+Output Sleeve -> GND
+Output Ring   -> not connected
+
+MCP4728 B  -> 1k -> LFO1 3.5mm Tip
+LFO1 Sleeve -> GND
+
+MCP4728 C  -> 1k -> LFO2 3.5mm Tip
+LFO2 Sleeve -> GND
+
+MCP4728 D  -> leave unconnected, or 1k -> optional clock jack Tip
+Clock Sleeve -> GND
+```
 
 Your Nektar NX-P resistance measurements showed:
 
@@ -230,7 +284,7 @@ depth 75         set focused LFO depth/attenuation, 0-100% in 5% steps
 pw 60            pulse-wave width, 5-95%
 offset -25       shift focused LFO1/LFO2 center voltage, -50..50%
 link 1:2         lock LFO2 rate to LFO1; also link phase 0|90|180|270
-clock lfo1       full-swing clock square on VOUTD; clock off disables
+clock lfo1       full-swing clock square on DAC D; clock off disables
 sync             reset focused LFO phase; sync all resets every LFO
 tap              send twice at tempo to set the focused LFO rate
 response 924     compressed bench response; rebuilds the global map
@@ -495,7 +549,7 @@ pw 60            pulse-wave width for the focused LFO
 offset -25       shift focused LFO1/LFO2 center voltage
 link 1:2         lock LFO2 rate to half of LFO1's; link off to free-run
 link phase 90    linked LFO2 quarter-cycle offset (0|90|180|270)
-clock lfo1       clock square on VOUTD at LFO1's rate; clock off disables
+clock lfo1       clock square on DAC D at LFO1's rate; clock off disables
 sync             reset focused LFO phase; sync all resets every LFO
 tap              send twice at tempo to set the focused LFO rate
 polarity down    invert focused LFO1/LFO2
